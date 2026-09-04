@@ -35,7 +35,7 @@ BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "PEGA_TU_TOKEN_ACA")
 
 # ID del canal donde se postea la encuesta (activar Modo Desarrollador en Discord,
 # click derecho sobre el canal -> Copiar ID de canal)
-CHANNEL_ID = 1468298007962189825  # <-- reemplazar
+CHANNEL_ID = 1544782617940074587  # <-- reemplazar
 
 # URL pública del banner que aparece al pie del mensaje (subí banner_asado_vino.png
 # a cualquier canal de tu Discord, click derecho sobre la imagen -> Copiar enlace).

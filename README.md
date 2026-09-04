@@ -1,121 +1,114 @@
-# Bot de Votación de Mapas — Asado & Vino
+# Bot de Rotación de Mapas — Asado & Vino / 7DL VKR
 
-Bot de Discord que postea una encuesta semanal de "Mapa de la semana" para Hell Let Loose, cuenta los votos en vivo por reacciones, y cierra/reabre automáticamente cada semana.
+Bot de Discord que le da a la comunidad el poder de elegir qué mapas se juegan cada semana en el servidor público. La gente vota reaccionando a un mensaje, y el bot aplica automáticamente el resultado en el CRCON — sin que ningún admin tenga que tocar nada a mano.
 
-Repo: `insuajuancruz-sketch/Asado-Vino-Bot` (GitHub)
-Hosting: Railway (proyecto conectado al repo, deploy automático en cada push a `main`)
-
----
-
-## 1. Archivos del proyecto
-
-| Archivo | Para qué sirve |
-|---|---|
-| `mapvote_bot.py` | Todo el código del bot. |
-| `requirements.txt` | Dependencias de Python (`discord.py`). Railway lo usa para instalar paquetes. |
-| `railpack.json` | Le dice a Railway qué comando correr para arrancar el bot (`python mapvote_bot.py`). **Es obligatorio** — sin este archivo, Railway no sabe cómo iniciar un proyecto Python que no es un framework web (Flask/Django/etc.) y el build falla con "No start command detected". |
-| `Procfile` | Quedó del primer intento de fix. Railway ya no lo usa (usa `railpack.json` en su lugar), pero no molesta si se deja. |
-| `mapvote_state.json` | Se genera solo en tiempo de ejecución (no está en el repo). Guarda el estado actual de la encuesta: mensaje, fechas, votos. Si Railway reinicia el proceso, el bot lo lee para retomar donde quedó. |
+Repo: `insuajuancruz-sketch/Asado-Vino-Bot` (GitHub, público)
+Hosting: Railway (deploy automático en cada cambio subido al repo)
+Canal donde vive: `#votemap`
 
 ---
 
-## 2. Configuración (dentro de `mapvote_bot.py`)
+## 1. Qué hace, en criollo
 
-Todo se edita al principio del archivo, en el bloque `CONFIGURACIÓN`:
+1. El bot postea una encuesta con 12 mapas candidatos, cada uno con su emoji.
+2. Cualquiera del server puede votar reaccionando con el emoji del mapa que quiere jugar (se puede votar por varios mapas a la vez).
+3. El conteo se actualiza solo, en vivo, cada vez que alguien vota o saca su voto.
+4. Cuando llega el horario de cierre (una vez por semana), el bot:
+   - Toma los **8 mapas más votados** de los 12 candidatos.
+   - Los carga automáticamente en la rotación real del servidor (vía la API del CRCON) — saca lo que estaba antes y pone los 8 nuevos.
+   - Edita el mensaje mostrando el resultado ("🏆 Rotación resultante") con el ranking.
+   - Postea una encuesta nueva para la semana siguiente, con `@everyone` para avisarle a todo el server.
 
-| Variable | Qué controla |
-|---|---|
-| `BOT_TOKEN` | Se lee de la variable de entorno `DISCORD_BOT_TOKEN` (configurada en Railway → Variables). No se pega el token directo en el código. |
-| `CHANNEL_ID` | Canal donde se postea y actualiza la encuesta. Actual: `1544782617940074587` (`#votemap`). |
-| `BANNER_URL` | URL de la imagen grande al pie del embed (banner "Asado & Vino"). |
-| `AUTHOR_ICON_URL` | URL del logo chico que aparece junto al título del embed. |
-| `MAPS` | Lista de mapas candidatos: `(nombre, emoji)`. El orden acá define el orden en el embed. |
-| `VOTING_WINDOW_HOURS` | Cuántas horas dura la votación abierta. |
-| `HOURS_BEFORE_MATCH_TO_POST` | Cuánto antes del match se calcula el cierre de la votación. |
-| `MATCH_WEEKDAY` | Día de la semana del match (0=lunes … 6=domingo). |
-| `MATCH_HOUR_UTC` / `MATCH_MINUTE_UTC` | Hora del match, en UTC. Ojo: Argentina está a UTC-3, así que para que el match sea a las 22:00 hora Argentina, `MATCH_HOUR_UTC` debe ser `1` (del día siguiente) — conviene probarlo y ajustar si el horario mostrado no coincide con lo esperado. |
-
-Cualquier cambio a estas variables requiere:
-1. Editar `mapvote_bot.py` (local o directo en GitHub)
-2. Subir el cambio al repo (commit)
-3. Railway redeploya solo — si no, forzar manualmente desde **Deployments → Redeploy**
+Todo el ciclo se repite solo, semana tras semana, sin que un admin tenga que entrar al panel del CRCON a cambiar la rotación a mano.
 
 ---
 
-## 3. Cómo funciona (ciclo semanal)
+## 2. Qué puede hacer un admin del clan (sin tocar código)
 
-1. **Arranque**: si existe `mapvote_state.json` de una ejecución anterior, retoma esa encuesta. Si no, arma una nueva.
-2. **Encuesta nueva**: calcula la fecha del próximo match según `MATCH_WEEKDAY/HOUR`, calcula cuándo cierra la votación, postea el embed en `CHANNEL_ID` con los mapas de `MAPS`, y agrega las reacciones automáticamente.
-3. **Votos en vivo**: cada reacción agregada/quitada en ese mensaje actualiza el conteo y reescribe el embed al instante.
-4. **Cierre automático**: un chequeo corre cada 30 segundos; cuando se cumple la hora de cierre, determina el mapa más votado, edita el mensaje mostrando el ganador arriba, y postea automáticamente la encuesta de la semana siguiente.
-
-Todo esto corre solo, sin intervención manual, mientras el proceso siga vivo en Railway.
+- **Nada manual es necesario para el funcionamiento normal.** El bot corre solo.
+- **Si querés forzar que la votación cierre antes de tiempo:** no hay un botón para esto todavía — hay que esperar al horario configurado, o pedir el ajuste de código (ver sección 5).
+- **Si el bot deja de responder o se cae:** Railway lo reinicia solo (tiene reinicio automático configurado). Si algo persiste, avisar para revisar el log en Railway.
+- **Si votaste mal o te arrepentiste:** sacá tu reacción y volvé a poner la correcta — el conteo se ajusta solo.
 
 ---
 
-## 4. Deploy en Railway — pasos ya hechos (referencia)
+## 3. Los 12 mapas candidatos actuales
 
-1. Cuenta de Discord Developer: app "Asado & Vino" creada, bot generado.
-2. Bot invitado al servidor vía OAuth2 URL Generator, con permisos: Send Messages, Manage Messages, Add Reactions, Embed Links, Read Message History.
-3. Repo de GitHub `Asado-Vino-Bot` con `mapvote_bot.py`, `requirements.txt`, `railpack.json`.
-4. Proyecto en Railway conectado a ese repo (deploy automático en cada push).
-5. Variable de entorno `DISCORD_BOT_TOKEN` cargada en Railway → pestaña **Variables**.
-6. Start Command confirmado en **Settings → Deploy**: `python mapvote_bot.py` (redundante con `railpack.json`, pero no molesta tenerlo en ambos lados).
+| Mapa | Emoji | Modo |
+|---|---|---|
+| Carentan | 🏠 | Warfare |
+| Omaha Beach | 🌊 | Warfare |
+| Utah Beach | 🪖 | Warfare |
+| St. Mere Eglise | ⛪ | Warfare |
+| St. Marie Du Mont | 🏘️ | Warfare |
+| Foy | ❄️ | Warfare |
+| Hurtgen Forest | 🌲 | Warfare |
+| Hill 400 | ⛰️ | Warfare |
+| Purple Heart Lane | 🌧️ | Warfare |
+| Driel | 🌷 | Warfare |
+| Remagen | 🌉 | Offensive (US) |
+| Kursk | 🐻 | Offensive (RUS) |
 
-### Cómo hacer un cambio de configuración de ahora en adelante
+De estos 12, los **8 más votados** cada semana pasan a ser la rotación real del servidor. Si menos de 8 mapas reciben al menos un voto, la rotación queda con menos de 8 (no se rellena con mapas sin votos).
 
-1. Editar `mapvote_bot.py` en GitHub (ícono de lápiz sobre el archivo) o subir una versión nueva con "Upload files".
+**Para cambiar esta lista** (agregar, sacar, o cambiar algún mapa/modo/emoji) hace falta editar el código — ver sección 5.
+
+---
+
+## 4. Cronograma
+
+- **Cierra la votación:** martes a las 22:00 UTC (ajustar según zona horaria local del clan si hace falta — UTC no es la misma hora en Argentina).
+- **Se repite:** cada semana, automáticamente, sin intervención.
+
+---
+
+## 5. Cambios que requieren tocar el código (para quien mantenga el bot)
+
+Cualquiera de estos cambios se hace en 3 pasos siempre:
+1. Editar `mapvote_bot.py` en GitHub (ícono de lápiz sobre el archivo, o "Upload files" para reemplazarlo entero).
 2. Commit changes.
-3. Railway detecta el push y redeploya solo en unos segundos. Confirmar en la pestaña **Deployments** que el build terminó en verde.
-4. Si no redeploya solo, forzar manualmente: **Deployments → (⋮) → Redeploy**.
+3. Railway redeploya solo en unos segundos (confirmar en la pestaña **Deployments** que terminó en verde). Si no redeploya solo, forzar manualmente: **Deployments → (⋮) → Redeploy**.
+
+| Qué cambiar | Dónde en el código |
+|---|---|
+| Agregar/sacar un mapa candidato | Lista `MAPS` |
+| Cambiar cuántos mapas entran en la rotación (hoy 8) | `ROTATION_SIZE` |
+| Cambiar el día/hora de cierre semanal | `CLOSE_WEEKDAY`, `CLOSE_HOUR_UTC`, `CLOSE_MINUTE_UTC` |
+| Cambiar el canal donde se postea | `CHANNEL_ID` |
+| Cambiar el banner o el logo del embed | `BANNER_URL`, `AUTHOR_ICON_URL` |
+| Sacar el `@everyone` de la encuesta nueva | Línea `content="@everyone ..."` en `post_new_poll()` |
 
 ---
 
-## 5. Seguridad — rotación del token
+## 6. Variables de entorno (en Railway → Variables, nunca en el código)
 
-El token del bot se pegó en el chat de esta conversación en algún momento durante el setup. Se recomienda:
-1. Ir a Discord Developer Portal → aplicación "Asado & Vino" → **Bot**.
-2. **Reset Token** → genera uno nuevo e invalida el anterior.
-3. Actualizar la variable `DISCORD_BOT_TOKEN` en Railway → Variables con el nuevo valor.
-4. Railway redeploya solo al guardar la variable.
+| Variable | Para qué |
+|---|---|
+| `DISCORD_BOT_TOKEN` | Conecta el bot a Discord. |
+| `CRCON_API_TOKEN` | Le permite al bot aplicar la rotación en el servidor. Se genera en el Django Admin del CRCON (`/admin` → Django API Keys → Add). |
 
-Hacer esto no rompe nada del lado de Discord (el bot sigue siendo el mismo, con el mismo ID e invitación) — solo cambia la credencial de conexión.
-
----
-
-## 6. Troubleshooting — problemas ya resueltos
-
-**"No start command detected" en el build de Railway**
-Causa: Railway usa Railpack (no Nixpacks/Procfile clásico) para detectar cómo arrancar proyectos Python. Sin un framework web reconocido (Flask/Django/etc.), necesita que se le indique el comando explícitamente.
-Solución: archivo `railpack.json` en la raíz del repo con:
-```json
-{
-  "$schema": "https://schema.railpack.com",
-  "deploy": {
-    "startCommand": "python mapvote_bot.py"
-  }
-}
-```
-
-**El bot sigue posteando en el canal viejo después de cambiar `CHANNEL_ID`**
-Causa: Railway no redeployó el cambio más reciente (quedó corriendo la versión anterior del código).
-Solución: confirmar en GitHub que el archivo tiene el valor correcto, y forzar **Redeploy** manual en Railway si no lo hizo solo.
-
-**Mensaje duplicado en dos canales tras un cambio de canal**
-Es esperable brevemente: el mensaje viejo en el canal anterior queda "congelado" (no se borra solo). Borrarlo a mano una vez confirmado que el nuevo funciona en el canal correcto.
+Si alguna vez hay que rotar/renovar estos tokens (por ejemplo, si se filtró alguno), se cambia acá y Railway redeploya solo — no hace falta tocar código.
 
 ---
 
-## 7. Preguntas frecuentes
+## 7. Qué pasa si algo falla en la integración con el CRCON
 
-**¿Qué pasa si Railway reinicia el bot (deploy, caída, etc.) a mitad de una votación en curso?**
-No se pierde nada — al arrancar, el bot lee `mapvote_state.json` y retoma la encuesta activa, con los votos que ya había.
+El bot está armado para que, si la conexión al CRCON falla por cualquier motivo (token vencido, servidor caído, error de red), **la parte de Discord siga funcionando igual** — la encuesta se sigue votando y cerrando normal. Lo único que no pasa es la aplicación automática de la rotación, y el bot **avisa en el canal** con un mensaje de error o advertencia en vez de fallar en silencio.
 
-**¿Cómo agrego o saco un mapa de la lista?**
-Editar la lista `MAPS` en `mapvote_bot.py` (agregar o quitar una tupla `("Nombre", "emoji")`), subir el cambio. Aplica recién en la próxima encuesta que se genere (no reordena la que ya está publicada).
+Si eso pasa, la rotación se puede cargar a mano desde el panel del CRCON (Settings → Maps → Rotation) usando el ranking que quedó publicado en el mensaje de resultado.
 
-**¿Cómo cambio el día/hora del match?**
-Editar `MATCH_WEEKDAY`, `MATCH_HOUR_UTC`, `MATCH_MINUTE_UTC`. Aplica en la próxima encuesta que se genere automáticamente tras el cierre actual.
+---
 
-**¿El bot depende del CRCON o del servidor de HLL de alguna forma?**
-No. Es completamente independiente — solo interactúa con Discord. Corre en Railway, no en el VPS del CRCON.
+## 8. Preguntas frecuentes
+
+**¿Qué pasa si Railway reinicia el bot a mitad de una votación?**
+No se pierde nada — el bot lee el mensaje existente en `#votemap` y reconstruye los votos leyendo directamente las reacciones reales de Discord, sin depender de ningún archivo guardado aparte.
+
+**¿El bot depende del CRCON para funcionar?**
+Para la parte de encuesta y votación, no — es 100% independiente, corre en Railway. Solo se conecta al CRCON al momento de cerrar la votación, para aplicar la rotación ganadora.
+
+**¿Puede votar cualquiera, o hay restricción?**
+Vota cualquiera que tenga acceso al canal `#votemap`. No hay restricción por rol configurada.
+
+**¿Qué pasa si un mapa no tiene su ID de CRCON bien configurado?**
+Ese mapa puede ganar la votación igual, pero al aplicar la rotación el bot lo salta y avisa en el canal cuántos mapas se saltearon por ese motivo — nunca falla en silencio.

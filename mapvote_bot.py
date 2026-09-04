@@ -76,7 +76,7 @@ MATCH_WEEKDAY = 2   # miércoles
 MATCH_HOUR_UTC = 22
 MATCH_MINUTE_UTC = 0
 
-STATE_FILE = "mapvote_state.json"
+STATE_FILE = "/data/mapvote_state.json" if os.path.isdir("/data") else "mapvote_state.json"
 
 EMBED_COLOR = 0x2ECC71
 FOOTER_TEXT = "Vota el mapa · actualizado en vivo"
@@ -170,7 +170,10 @@ def build_embed(state: dict, winner_name: str | None = None) -> discord.Embed:
 
     status = "votación cerrada" if closed else "votación abierta"
     now_str = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
-    embed.set_footer(text=f"Asado & Vino · {status} · actualizado {now_str}")
+    # El sufijo "state:" guarda match_at/closes_at/closed en formato compacto,
+    # para poder reconstruir el estado leyendo el mensaje si se pierde el archivo local.
+    state_tag = f"state:{state['match_at']}|{state['voting_closes_at']}|{int(closed)}"
+    embed.set_footer(text=f"Asado & Vino · {status} · actualizado {now_str} · {state_tag}")
     return embed
 
 
@@ -219,16 +222,66 @@ async def refresh_poll_message(channel: discord.TextChannel, winner_name: str | 
     await message.edit(embed=build_embed(state, winner_name=winner_name))
 
 
+async def rebuild_state_from_channel(channel: discord.TextChannel) -> dict | None:
+    """
+    Busca el último mensaje de encuesta que mandó el bot en el canal y reconstruye
+    el estado (fechas + votos) leyendo directamente el footer y las reacciones reales
+    del mensaje. Sirve como respaldo cuando se pierde mapvote_state.json (por ejemplo,
+    tras un redeploy sin volumen persistente en Railway).
+    """
+    async for message in channel.history(limit=100):
+        if message.author.id != client.user.id or not message.embeds:
+            continue
+        embed = message.embeds[0]
+        if not embed.title or "Mapa de la semana" not in embed.title:
+            continue
+        footer_text = embed.footer.text or ""
+        if "state:" not in footer_text:
+            continue
+
+        try:
+            payload = footer_text.split("state:", 1)[1]
+            match_iso, closes_iso, closed_flag = payload.split("|")
+        except ValueError:
+            continue
+
+        votes = {emoji: [] for _, emoji in MAPS}
+        for reaction in message.reactions:
+            emoji_key = str(reaction.emoji)
+            if emoji_key not in votes:
+                continue
+            async for user in reaction.users():
+                if user.id == client.user.id:
+                    continue
+                name = await get_display_name(channel.guild, user.id)
+                votes[emoji_key].append(f"{user.id}:{name}")
+
+        print(f"Estado reconstruido desde el mensaje {message.id} en #{channel.name}")
+        return {
+            "message_id": message.id,
+            "match_at": match_iso,
+            "voting_closes_at": closes_iso,
+            "votes": votes,
+            "closed": closed_flag == "1",
+        }
+    return None
+
+
 @client.event
 async def on_ready():
     global state
     print(f"Conectado como {client.user}")
+    channel = client.get_channel(CHANNEL_ID)
     loaded = load_state()
     if loaded:
         state = loaded
     else:
-        channel = client.get_channel(CHANNEL_ID)
-        await post_new_poll(channel)
+        recovered = await rebuild_state_from_channel(channel)
+        if recovered:
+            state = recovered
+            save_state(state)
+        else:
+            await post_new_poll(channel)
     poll_loop.start()
 
 

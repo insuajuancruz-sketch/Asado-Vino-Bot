@@ -65,8 +65,8 @@ MAPS = [
     ("Utah Beach", "🪖", "utahbeach_warfare"),
     ("St. Mere Eglise", "⛪", "stmereeglise_warfare"),
     ("St. Marie Du Mont", "🏘️", "stmariedumont_warfare"),
-    ("Foy", "🌲", "foy_warfare"),
-    ("Hurtgen Forest", "🌫️", "hurtgenforest_warfare_V2"),
+    ("Foy", "❄️", "foy_warfare"),
+    ("Hurtgen Forest", "🌲", "hurtgenforest_warfare_V2"),
     ("Hill 400", "⛰️", "hill400_warfare"),
     ("Purple Heart Lane", "🌧️", "PHL_L_1944_Warfare"),
     ("Driel", "🌷", "driel_warfare"),
@@ -277,7 +277,7 @@ async def post_new_poll(channel: discord.TextChannel):
     global state
     state = new_poll_state()
     embed = build_embed(state)
-    message = await channel.send(embed=embed)
+    message = await channel.send(content="@everyone 📢 ¡Nueva votación de mapas de la semana!", embed=embed)
     for _, emoji, _ in MAPS:
         await message.add_reaction(emoji)
     state["message_id"] = message.id

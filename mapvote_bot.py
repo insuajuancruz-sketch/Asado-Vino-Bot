@@ -40,7 +40,7 @@ CHANNEL_ID = 1544782617940074587  # #votemap
 # URL pública del banner que aparece al pie del mensaje (subí banner_asado_vino.png
 # a cualquier canal de tu Discord, click derecho sobre la imagen -> Copiar enlace).
 # Poner None si no querés banner.
-BANNER_URL = "https://raw.githubusercontent.com/insuajuancruz-sketch/Asado-Vino-Bot/main/Captura%20de%20pantalla%202026-09-02%20161454.png"
+BANNER_URL = "https://cdn.jsdelivr.net/gh/insuajuancruz-sketch/Asado-Vino-Bot@main/BannerAsado.png"
 
 # URL del logo chico (ícono del autor del embed, arriba a la izquierda). Poner None si no querés.
 AUTHOR_ICON_URL = "PEGA_AQUI_LA_URL_DEL_LOGO"

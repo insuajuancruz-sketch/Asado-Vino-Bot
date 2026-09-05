@@ -231,8 +231,7 @@ def build_embed(state: dict) -> discord.Embed:
     for name, emoji, _ in MAPS:
         voters = state["votes"].get(emoji, [])
         count = len(voters)
-        names = "\n".join(v.split(":", 1)[1] for v in voters) if voters else "\u2014"
-        embed.add_field(name=f"{emoji} {name} ({count})", value=names, inline=True)
+        embed.add_field(name=f"{emoji} {name}", value=f"**{count}** voto{'s' if count != 1 else ''}", inline=True)
 
     if AUTHOR_ICON_URL and AUTHOR_ICON_URL != "PEGA_AQUI_LA_URL_DEL_LOGO":
         embed.set_author(name="ASADO & VINO", icon_url=AUTHOR_ICON_URL)

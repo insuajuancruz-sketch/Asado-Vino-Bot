@@ -217,7 +217,7 @@ def build_embed(state: dict) -> discord.Embed:
     embed.description = (
         "La votación está cerrada, la rotación de la semana quedó arriba."
         if closed
-        else f"Elegí los mapas que te gustaría jugar esta semana. "
+        else f"Elegí los mapas que te gustaría jugar la próxima semana. "
              f"Los {ROTATION_SIZE} más votados forman la rotación."
     )
 

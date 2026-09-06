@@ -450,8 +450,28 @@ async def poll_loop():
     map_ids = [crcon_id for _, _, crcon_id, votes in top_maps if votes > 0]
     result_msg = await apply_rotation_to_crcon(map_ids)
     print(result_msg)
+
+    # Anuncio dedicado con la rotación activa de la semana, agrupada por categoría,
+    # para que quede como referencia clara aunque la encuesta nueva se postee arriba.
+    warfare_lines = [
+        f"{emoji} {name} — {votes} voto{'s' if votes != 1 else ''}"
+        for name, emoji, crcon_id, votes in top_maps
+        if any(m[0] == name and m[3] == "warfare" for m in MAPS)
+    ]
+    offensive_lines = [
+        f"{emoji} {name} — {votes} voto{'s' if votes != 1 else ''}"
+        for name, emoji, crcon_id, votes in top_maps
+        if any(m[0] == name and m[3] == "offensive" for m in MAPS)
+    ]
+    announce = discord.Embed(
+        title="🗺️ Rotación activa de la semana",
+        description=result_msg,
+        color=EMBED_COLOR,
+    )
+    announce.add_field(name=f"⚔️ Warfare ({len(warfare_lines)})", value="\n".join(warfare_lines) or "—", inline=False)
+    announce.add_field(name=f"🎯 Offensive ({len(offensive_lines)})", value="\n".join(offensive_lines) or "—", inline=False)
     try:
-        await channel.send(result_msg)
+        await channel.send(embed=announce)
     except Exception:
         pass
 

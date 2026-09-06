@@ -56,26 +56,36 @@ BANNER_URL = "https://cdn.jsdelivr.net/gh/insuajuancruz-sketch/Asado-Vino-Bot@ma
 # URL del logo chico (ícono del autor, arriba a la izquierda). Poner None si no querés.
 AUTHOR_ICON_URL = "PEGA_AQUI_LA_URL_DEL_LOGO"
 
-# Lista de mapas candidatos: (nombre a mostrar, emoji, ID real en el CRCON)
-# 12 candidatos: 10 en Warfare + 2 en Offensive. IDs confirmados con GET /api/get_maps
-# el 04/09/2026. El bot selecciona los ROTATION_SIZE (8) más votados de esta lista.
+# Lista de mapas candidatos: (nombre a mostrar, emoji, ID real en el CRCON, categoría)
+# categoría: "warfare" u "offensive" -- se usa para garantizar la composición de la
+# rotación final (ver WARFARE_SLOTS / OFFENSIVE_SLOTS más abajo).
+# 16 candidatos: 12 Warfare + 4 Offensive. IDs confirmados con GET /api/get_maps
+# el 04/09/2026.
 MAPS = [
-    ("Carentan", "🏠", "carentan_warfare"),
-    ("Omaha Beach", "🌊", "omahabeach_warfare"),
-    ("Utah Beach", "🪖", "utahbeach_warfare"),
-    ("St. Mere Eglise", "⛪", "stmereeglise_warfare"),
-    ("St. Marie Du Mont", "🏘️", "stmariedumont_warfare"),
-    ("Foy", "❄️", "foy_warfare"),
-    ("Hurtgen Forest", "🌲", "hurtgenforest_warfare_V2"),
-    ("Hill 400", "⛰️", "hill400_warfare"),
-    ("Purple Heart Lane", "🌧️", "PHL_L_1944_Warfare"),
-    ("Driel", "🌷", "driel_warfare"),
-    ("Remagen (Off. US)", "🌉", "REM_L_1945_OffensiveUS"),
-    ("Kursk (Off. RUS)", "🐻", "kursk_offensive_rus"),
+    ("Carentan", "🏠", "carentan_warfare", "warfare"),
+    ("Omaha Beach", "🌊", "omahabeach_warfare", "warfare"),
+    ("Utah Beach", "🪖", "utahbeach_warfare", "warfare"),
+    ("St. Mere Eglise", "⛪", "stmereeglise_warfare", "warfare"),
+    ("St. Marie Du Mont", "🏘️", "stmariedumont_warfare", "warfare"),
+    ("Foy", "❄️", "foy_warfare", "warfare"),
+    ("Hurtgen Forest", "🌲", "hurtgenforest_warfare_V2", "warfare"),
+    ("Hill 400", "⛰️", "hill400_warfare", "warfare"),
+    ("Purple Heart Lane", "🌧️", "PHL_L_1944_Warfare", "warfare"),
+    ("Driel", "🌷", "driel_warfare", "warfare"),
+    ("Mortain", "🌾", "mortain_warfare_day", "warfare"),
+    ("Elsenborn Ridge", "🏔️", "elsenbornridge_warfare_day", "warfare"),
+    ("Remagen (Off. US)", "🌉", "REM_L_1945_OffensiveUS", "offensive"),
+    ("Kursk (Off. RUS)", "🐻", "kursk_offensive_rus", "offensive"),
+    ("Kharkov (Off. RUS)", "🥶", "kharkov_offensive_rus", "offensive"),
+    ("El Alamein (Off. CW)", "🏜️", "elalamein_offensive_CW", "offensive"),
 ]
 
-# Cuántos mapas entran en la rotación semanal (los más votados)
-ROTATION_SIZE = 8
+# Composición garantizada de la rotación semanal: no es simplemente "los 8 más
+# votados" -- siempre entran los WARFARE_SLOTS Warfare más votados y los
+# OFFENSIVE_SLOTS Offensive más votados, cada categoría compite solo contra sí misma.
+WARFARE_SLOTS = 6
+OFFENSIVE_SLOTS = 2
+ROTATION_SIZE = WARFARE_SLOTS + OFFENSIVE_SLOTS  # 8, solo para referencia/mensajes
 
 # Día y hora en que cierra la votación y se aplica la nueva rotación
 # (0=lunes ... 6=domingo), hora/minuto en UTC. La próxima encuesta se abre
@@ -125,20 +135,35 @@ def new_poll_state() -> dict:
     return {
         "message_id": None,
         "voting_closes_at": closes_at.isoformat(),
-        "votes": {emoji: [] for _, emoji, _ in MAPS},  # emoji -> lista de "user_id:nombre"
+        "votes": {emoji: [] for _, emoji, _, _ in MAPS},  # emoji -> lista de "user_id:nombre"
         "closed": False,
         "rotation_result": None,  # lista de [nombre, votos], se llena al cerrar
     }
 
 
 def get_top_maps(state: dict) -> list[tuple[str, str, str, int]]:
-    """Devuelve los ROTATION_SIZE mapas más votados: (nombre, emoji, crcon_id, cantidad_votos)."""
-    scored = [
+    """
+    Devuelve la rotación final: los WARFARE_SLOTS mapas Warfare más votados +
+    los OFFENSIVE_SLOTS mapas Offensive más votados (cada categoría compite
+    solo contra sí misma, así la composición queda garantizada). Formato de
+    cada item: (nombre, emoji, crcon_id, cantidad_votos).
+    """
+    warfare = [
         (name, emoji, crcon_id, len(state["votes"].get(emoji, [])))
-        for name, emoji, crcon_id in MAPS
+        for name, emoji, crcon_id, category in MAPS
+        if category == "warfare"
     ]
-    scored.sort(key=lambda x: x[3], reverse=True)
-    return scored[:ROTATION_SIZE]
+    offensive = [
+        (name, emoji, crcon_id, len(state["votes"].get(emoji, [])))
+        for name, emoji, crcon_id, category in MAPS
+        if category == "offensive"
+    ]
+    warfare.sort(key=lambda x: x[3], reverse=True)
+    offensive.sort(key=lambda x: x[3], reverse=True)
+
+    selected = warfare[:WARFARE_SLOTS] + offensive[:OFFENSIVE_SLOTS]
+    selected.sort(key=lambda x: x[3], reverse=True)  # orden de ranking para mostrar
+    return selected
 
 
 # =========================================================================
@@ -217,8 +242,8 @@ def build_embed(state: dict) -> discord.Embed:
     embed.description = (
         "La votación está cerrada, la rotación de la semana quedó arriba."
         if closed
-        else f"Elegí los mapas que te gustaría jugar la próxima semana. "
-             f"Los {ROTATION_SIZE} más votados forman la rotación."
+        else f"Elegí los mapas que te gustaría jugar esta semana. "
+             f"Se arma con los {WARFARE_SLOTS} Warfare y los {OFFENSIVE_SLOTS} Offensive más votados."
     )
 
     embed.add_field(
@@ -228,7 +253,7 @@ def build_embed(state: dict) -> discord.Embed:
     )
     embed.add_field(name="🔁 Repite", value="Cada semana", inline=False)
 
-    for name, emoji, _ in MAPS:
+    for name, emoji, _, _ in MAPS:
         voters = state["votes"].get(emoji, [])
         count = len(voters)
         embed.add_field(name=f"{emoji} {name}", value=f"**{count}** voto{'s' if count != 1 else ''}", inline=True)
@@ -277,7 +302,7 @@ async def post_new_poll(channel: discord.TextChannel):
     state = new_poll_state()
     embed = build_embed(state)
     message = await channel.send(content="@everyone 📢 ¡Nueva votación de mapas de la semana!", embed=embed)
-    for _, emoji, _ in MAPS:
+    for _, emoji, _, _ in MAPS:
         await message.add_reaction(emoji)
     state["message_id"] = message.id
     save_state(state)
@@ -315,7 +340,7 @@ async def rebuild_state_from_channel(channel: discord.TextChannel) -> dict | Non
         except ValueError:
             continue
 
-        votes = {emoji: [] for _, emoji, _ in MAPS}
+        votes = {emoji: [] for _, emoji, _, _ in MAPS}
         for reaction in message.reactions:
             emoji_key = str(reaction.emoji)
             if emoji_key not in votes:

@@ -193,8 +193,9 @@ async def apply_rotation_to_crcon(map_ids: list[str]) -> str:
             # 1. Traer la rotación actual
             async with session.get(f"{CRCON_BASE_URL}/api/get_map_rotation") as resp:
                 data = await resp.json()
-                current = data.get("result", []) or []
-                current_ids = [m.get("id") or m for m in current] if current else []
+                result = data.get("result") or {}
+                current = result.get("maps", []) if isinstance(result, dict) else (result or [])
+                current_ids = [m.get("id") if isinstance(m, dict) else m for m in current]
 
             # 2. Sacar cada mapa actual de la rotación
             for map_id in current_ids:
@@ -474,6 +475,15 @@ async def poll_loop():
         await channel.send(embed=announce)
     except Exception:
         pass
+
+    # Borra el mensaje de la encuesta que acaba de cerrar (ya quedó resumida en el
+    # anuncio de arriba), para no acumular encuestas viejas en el canal.
+    if state.get("message_id"):
+        try:
+            old_message = await channel.fetch_message(state["message_id"])
+            await old_message.delete()
+        except Exception:
+            pass
 
     # Arma la próxima encuesta de la semana siguiente
     await post_new_poll(channel)

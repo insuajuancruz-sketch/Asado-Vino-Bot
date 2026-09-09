@@ -12,9 +12,12 @@ Setup en Discord Developer Portal (https://discord.com/developers/applications):
     1. Crear una aplicación -> Bot -> Reset Token -> copiar el token (va en la variable
        de entorno DISCORD_BOT_TOKEN, configurada en Railway -> Variables).
     2. NO hace falta activar ningún "Privileged Gateway Intent".
-    3. En "OAuth2 -> URL Generator": scope "bot", permisos: Send Messages, Manage Messages,
-       Add Reactions, Embed Links, Read Message History.
-    4. Invitar el bot al servidor con la URL generada.
+    3. En "OAuth2 -> URL Generator": scopes "bot" Y "applications.commands" (este último
+       es necesario para que funcione el comando /votemap_cerrar_en), permisos: Send
+       Messages, Manage Messages, Add Reactions, Embed Links, Read Message History.
+    4. Invitar el bot al servidor con la URL generada. Si el bot ya estaba invitado sin
+       el scope "applications.commands", hay que volver a generar la URL con ambos
+       scopes marcados y re-invitarlo (no rompe nada, solo agrega el permiso que falta).
 
 Setup de la integración con CRCON:
     1. En el panel de tu CRCON, generar un token de API (Settings -> buscar la sección
@@ -87,12 +90,9 @@ WARFARE_SLOTS = 6
 OFFENSIVE_SLOTS = 2
 ROTATION_SIZE = WARFARE_SLOTS + OFFENSIVE_SLOTS  # 8, solo para referencia/mensajes
 
-# Día y hora en que cierra la votación y se aplica la nueva rotación
-# (0=lunes ... 6=domingo), hora/minuto en UTC. La próxima encuesta se abre
-# inmediatamente después, para la semana siguiente.
-CLOSE_WEEKDAY = 1   # martes
-CLOSE_HOUR_UTC = 22
-CLOSE_MINUTE_UTC = 0
+# Cada cuántos días se repite el ciclo de votación (cierra, aplica la rotación,
+# y abre la encuesta siguiente). Ej: 4 = la votación dura 4 días y vuelve a arrancar.
+VOTE_CYCLE_DAYS = 4
 
 # --- Integración CRCON ---
 CRCON_BASE_URL = "http://152.53.39.31:8010"  # sin barra al final
@@ -118,20 +118,9 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def next_close_datetime(after: datetime) -> datetime:
-    """Calcula el próximo cierre de votación (UTC) según CLOSE_WEEKDAY/HOUR/MINUTE."""
-    days_ahead = (CLOSE_WEEKDAY - after.weekday()) % 7
-    candidate = after.replace(
-        hour=CLOSE_HOUR_UTC, minute=CLOSE_MINUTE_UTC, second=0, microsecond=0
-    ) + timedelta(days=days_ahead)
-    if candidate <= after:
-        candidate += timedelta(days=7)
-    return candidate
-
-
 def new_poll_state() -> dict:
     now = datetime.now(timezone.utc)
-    closes_at = next_close_datetime(now)
+    closes_at = now + timedelta(days=VOTE_CYCLE_DAYS)
     return {
         "message_id": None,
         "voting_closes_at": closes_at.isoformat(),
@@ -231,7 +220,7 @@ def build_embed(state: dict) -> discord.Embed:
     closes_at = datetime.fromisoformat(state["voting_closes_at"])
     closed = state.get("closed", False)
 
-    embed = discord.Embed(title="🗺️ Rotación de la semana (HLL — WW2)", color=EMBED_COLOR)
+    embed = discord.Embed(title="🗺️ Rotación de mapas (HLL — WW2)", color=EMBED_COLOR)
 
     if closed and state.get("rotation_result"):
         lines = [
@@ -241,9 +230,9 @@ def build_embed(state: dict) -> discord.Embed:
         embed.add_field(name="🏆 Rotación resultante", value="\n".join(lines), inline=False)
 
     embed.description = (
-        "La votación está cerrada, la rotación de la semana quedó arriba."
+        "La votación está cerrada, la rotación quedó arriba."
         if closed
-        else f"Elegí los mapas que te gustaría jugar esta semana. "
+        else f"Elegí los mapas que te gustaría jugar en este ciclo. "
              f"Se arma con los {WARFARE_SLOTS} Warfare y los {OFFENSIVE_SLOTS} Offensive más votados."
     )
 
@@ -252,7 +241,7 @@ def build_embed(state: dict) -> discord.Embed:
         value=f"<t:{int(closes_at.timestamp())}:F> (<t:{int(closes_at.timestamp())}:R>)",
         inline=False,
     )
-    embed.add_field(name="🔁 Repite", value="Cada semana", inline=False)
+    embed.add_field(name="🔁 Repite", value=f"Cada {VOTE_CYCLE_DAYS} días", inline=False)
 
     for name, emoji, _, _ in MAPS:
         voters = state["votes"].get(emoji, [])
@@ -278,9 +267,14 @@ def build_embed(state: dict) -> discord.Embed:
 # Cliente Discord
 # =========================================================================
 
+# ID del servidor de Discord (para registrar el comando /votemap_cerrar_en al instante
+# en vez de esperar hasta 1 hora que tarda la sincronización global de Discord).
+GUILD_ID = 1287171299705229434
+
 intents = discord.Intents.default()
 intents.reactions = True
 client = discord.Client(intents=intents)
+tree = discord.app_commands.CommandTree(client)
 
 state: dict = {}
 _member_cache: dict[int, str] = {}
@@ -302,7 +296,7 @@ async def post_new_poll(channel: discord.TextChannel):
     global state
     state = new_poll_state()
     embed = build_embed(state)
-    message = await channel.send(content="@everyone 📢 ¡Nueva votación de mapas de la semana!", embed=embed)
+    message = await channel.send(content=f"@everyone 📢 ¡Nueva votación de mapas! (dura {VOTE_CYCLE_DAYS} días)", embed=embed)
     for _, emoji, _, _ in MAPS:
         await message.add_reaction(emoji)
     state["message_id"] = message.id
@@ -324,13 +318,15 @@ async def rebuild_state_from_channel(channel: discord.TextChannel) -> dict | Non
     Busca el último mensaje de encuesta que mandó el bot en el canal y reconstruye
     el estado (fecha de cierre + votos) leyendo el footer y las reacciones reales
     del mensaje. Sirve como respaldo si se pierde mapvote_state.json.
+
+    Se identifica el mensaje correcto solo por el "state:" tag del footer (no por
+    el título del embed), para que cambiar el texto del título/descripción en el
+    futuro nunca rompa la reconstrucción de una votación en curso.
     """
     async for message in channel.history(limit=100):
         if message.author.id != client.user.id or not message.embeds:
             continue
         embed = message.embeds[0]
-        if not embed.title or "Rotación de la semana" not in embed.title:
-            continue
         footer_text = embed.footer.text or ""
         if "state:" not in footer_text:
             continue
@@ -379,6 +375,51 @@ async def on_ready():
         else:
             await post_new_poll(channel)
     poll_loop.start()
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    print("Comandos / sincronizados")
+
+
+@tree.command(
+    name="votemap_cerrar_en",
+    description="Cambia cuándo cierra la votación activa, sin resetear los votos.",
+    guild=discord.Object(id=GUILD_ID),
+)
+@discord.app_commands.describe(dias="En cuántos días (puede ser decimal, ej. 0.5 para 12hs) cierra la votación a partir de ahora")
+@discord.app_commands.checks.has_permissions(manage_guild=True)
+async def votemap_cerrar_en(interaction: discord.Interaction, dias: float):
+    if not state.get("message_id") or state.get("closed"):
+        await interaction.response.send_message(
+            "No hay una votación activa en este momento.", ephemeral=True
+        )
+        return
+    if dias <= 0:
+        await interaction.response.send_message(
+            "El número de días tiene que ser mayor a 0.", ephemeral=True
+        )
+        return
+
+    nueva_fecha = datetime.now(timezone.utc) + timedelta(days=dias)
+    state["voting_closes_at"] = nueva_fecha.isoformat()
+    save_state(state)
+
+    channel = client.get_channel(CHANNEL_ID)
+    await refresh_poll_message(channel)
+
+    fecha_str = nueva_fecha.strftime("%d/%m/%Y %H:%M UTC")
+    await interaction.response.send_message(
+        f"Listo — la votación activa ahora cierra el **{fecha_str}**. Los votos ya puestos se mantienen.",
+        ephemeral=True,
+    )
+
+
+@votemap_cerrar_en.error
+async def votemap_cerrar_en_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    if isinstance(error, discord.app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "Este comando es solo para administradores del servidor.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(f"Ocurrió un error: {error}", ephemeral=True)
 
 
 @client.event
@@ -465,7 +506,7 @@ async def poll_loop():
         if any(m[0] == name and m[3] == "offensive" for m in MAPS)
     ]
     announce = discord.Embed(
-        title="🗺️ Rotación activa de la semana",
+        title="🗺️ Rotación activa",
         description=result_msg,
         color=EMBED_COLOR,
     )

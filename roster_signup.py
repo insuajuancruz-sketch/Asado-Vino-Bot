@@ -1,0 +1,391 @@
+"""
+Anotación para partidas competitivas — 7DL.
+
+Reemplaza el uso de Apollo (que no tiene API/webhooks) por un sistema propio:
+    1. Un oficial abre la anotación con /abrir_anotacion, indicando el nombre
+       del evento y cuándo cierra (fecha/hora Argentina).
+    2. El bot postea un mensaje con reacciones ✅ (voy) / ❓ (tentativo) / ❌ (no voy).
+       Cada persona solo puede tener una reacción activa a la vez (el bot saca
+       las otras automáticamente si cambian de opinión).
+    3. Al llegar la hora de cierre, el bot:
+       - Edita el mensaje mostrando la lista final.
+       - Escribe la lista de "Accepted" (✅) en una pestaña nueva ("Anotados")
+         del Google Sheet del organigrama -- sin tocar las pestañas existentes
+         que arman los oficiales a mano.
+       - Avisa en el mismo canal que la anotación cerró y que ya se puede
+         armar el roster, con el link directo a la planilla.
+
+Requisitos nuevos:
+    pip install gspread google-auth
+
+Setup de Google Sheets (desde cero, es gratis):
+    1. Andá a https://console.cloud.google.com/ -> crear un proyecto nuevo
+       (cualquier nombre, ej. "7dl-bot").
+    2. En ese proyecto: "APIs y servicios" -> "Biblioteca" -> buscar
+       "Google Sheets API" -> Habilitar.
+    3. "APIs y servicios" -> "Credenciales" -> "Crear credenciales" ->
+       "Cuenta de servicio". Nombre: cualquiera (ej. "bot-7dl"). Crear.
+    4. Entrá a la cuenta de servicio recién creada -> pestaña "Claves" ->
+       "Agregar clave" -> "Crear clave nueva" -> tipo JSON -> Descarga un
+       archivo .json.
+    5. Abrí ese .json con el Bloc de notas, copiá TODO el contenido, y
+       pegalo como el valor de la variable de entorno GOOGLE_SERVICE_ACCOUNT_JSON
+       en Railway (todo en una sola variable, tal cual, con las llaves { }).
+    6. En el .json vas a ver un campo "client_email" (algo como
+       bot-7dl@tu-proyecto.iam.gserviceaccount.com). Copiá esa dirección.
+    7. Abrí el Google Sheet del organigrama -> botón "Compartir" -> pegá esa
+       dirección de email -> dale permiso de "Editor".
+    8. Copiá el ID de la planilla: es la parte de la URL entre "/d/" y
+       "/edit", por ejemplo en
+       https://docs.google.com/spreadsheets/d/1BgnPKbp6oPQjasASgqtn7-mKL-KjYazJ-3XK1bh7eC0/edit
+       el ID es "1BgnPKbp6oPQjasASgqtn7-mKL-KjYazJ-3XK1bh7eC0" -- pegalo en
+       ROSTER_SHEET_ID más abajo.
+"""
+
+import asyncio
+import json
+import os
+from datetime import datetime, timedelta, timezone
+
+import discord
+
+# =========================================================================
+# CONFIGURACIÓN
+# =========================================================================
+
+# Contenido completo del JSON de la cuenta de servicio de Google (ver setup arriba)
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+
+# ID del Google Sheet del organigrama (ver paso 8 del setup)
+ROSTER_SHEET_ID = os.environ.get("ROSTER_SHEET_ID", "")
+
+# Nombre de la pestaña nueva donde el bot escribe las listas (se crea sola si no existe)
+ROSTER_SHEET_TAB = "Anotados"
+
+# Rol a mencionar en el aviso de cierre (opcional). Poner el ID del rol de
+# oficiales/mariscales, o None para no mencionar a nadie en particular.
+OFICIALES_ROLE_ID = None  # <-- reemplazar por el ID del rol si querés
+
+# Hora Argentina = UTC-3 todo el año (no tiene horario de verano)
+ARG_OFFSET = timedelta(hours=-3)
+
+STATE_FILE = "/data/roster_state.json" if os.path.isdir("/data") else "roster_state.json"
+
+EMOJI_VOY = "✅"
+EMOJI_TENTATIVO = "❓"
+EMOJI_NO_VOY = "❌"
+EMOJI_TANQUE = "🛡️"
+
+# Estos tres son excluyentes entre sí (una sola respuesta de asistencia por persona)
+EXCLUSIVE_EMOJIS = {EMOJI_VOY, EMOJI_TENTATIVO, EMOJI_NO_VOY}
+# El tanque es una marca aparte -- no excluye ni es excluida por las de arriba
+ALL_TRACKED_EMOJIS = EXCLUSIVE_EMOJIS | {EMOJI_TANQUE}
+
+
+# =========================================================================
+# Estado persistente (varias anotaciones pueden estar abiertas a la vez,
+# una por canal/evento -- por eso es un diccionario por message_id)
+# =========================================================================
+
+def load_events() -> dict:
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_events(events: dict):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(events, f, ensure_ascii=False, indent=2)
+
+
+def parse_cierre(cierre_str: str) -> datetime | None:
+    """Parsea 'DD/MM HH:MM' en hora Argentina y devuelve un datetime en UTC."""
+    now = datetime.now(timezone.utc)
+    for year in (now.year, now.year + 1):
+        try:
+            naive = datetime.strptime(f"{cierre_str} {year}", "%d/%m %H:%M %Y")
+        except ValueError:
+            return None
+        local_dt = naive.replace(tzinfo=timezone(ARG_OFFSET))
+        utc_dt = local_dt.astimezone(timezone.utc)
+        if utc_dt > now - timedelta(hours=1):  # tolera un pequeño margen
+            return utc_dt
+    return None
+
+
+# =========================================================================
+# Embed del mensaje de anotación
+# =========================================================================
+
+def build_embed(event: dict) -> discord.Embed:
+    closes_at = datetime.fromisoformat(event["closes_at"])
+    closed = event.get("closed", False)
+
+    embed = discord.Embed(
+        title=f"📋 Anotación: {event['evento']}",
+        color=0x2ECC71 if not closed else 0x808080,
+    )
+    embed.description = "Reaccioná según tu disponibilidad." if not closed else "La anotación está cerrada."
+    embed.add_field(
+        name="🔒 Cierra" if not closed else "🔒 Cerró",
+        value=f"<t:{int(closes_at.timestamp())}:F> (<t:{int(closes_at.timestamp())}:R>)",
+        inline=False,
+    )
+
+    def names_list(status: str) -> str:
+        entries = event["signups"].get(status, [])
+        if not entries:
+            return "—"
+        return "\n".join(e.split(":", 1)[1] for e in entries)
+
+    embed.add_field(name=f"{EMOJI_VOY} Voy ({len(event['signups'].get(EMOJI_VOY, []))})", value=names_list(EMOJI_VOY), inline=True)
+    embed.add_field(name=f"{EMOJI_TENTATIVO} Tentativo ({len(event['signups'].get(EMOJI_TENTATIVO, []))})", value=names_list(EMOJI_TENTATIVO), inline=True)
+    embed.add_field(name=f"{EMOJI_NO_VOY} No voy ({len(event['signups'].get(EMOJI_NO_VOY, []))})", value=names_list(EMOJI_NO_VOY), inline=True)
+    embed.add_field(name=f"{EMOJI_TANQUE} Anotado para tanque ({len(event['signups'].get(EMOJI_TANQUE, []))})", value=names_list(EMOJI_TANQUE), inline=False)
+
+    if event.get("image_url"):
+        embed.set_image(url=event["image_url"])
+
+    embed.set_footer(text=f"state:{event['closes_at']}|{int(closed)}")
+    return embed
+
+
+# =========================================================================
+# Google Sheets — escritura (sync, se corre en un thread aparte para no
+# bloquear el loop de asyncio del bot)
+# =========================================================================
+
+def _write_to_sheet_sync(evento: str, cierre_local_str: str, names: list[str]) -> tuple[bool, str]:
+    if not GOOGLE_SERVICE_ACCOUNT_JSON or not ROSTER_SHEET_ID:
+        return False, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
+
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+
+        sh = client.open_by_key(ROSTER_SHEET_ID)
+        try:
+            ws = sh.worksheet(ROSTER_SHEET_TAB)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=ROSTER_SHEET_TAB, rows=500, cols=3)
+
+        existing = ws.get_all_values()
+        start_row = len(existing) + 2  # deja una fila en blanco de separador
+
+        rows = [[f"=== {evento} — cerró {cierre_local_str} (ARG) ==="]]
+        rows += [[n] for n in names] if names else [["(nadie se anotó)"]]
+        ws.update(f"A{start_row}", rows)
+        return True, "ok"
+    except Exception as error:
+        return False, str(error)
+
+
+async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, names: list[str]) -> tuple[bool, str]:
+    cierre_local = closes_at_utc.astimezone(timezone(ARG_OFFSET)).strftime("%d/%m/%Y %H:%M")
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, names)
+
+
+# =========================================================================
+# Cliente / comandos
+# =========================================================================
+
+_client: discord.Client | None = None
+_member_cache: dict[int, str] = {}
+
+
+async def _get_display_name(guild: discord.Guild, user_id: int) -> str:
+    if user_id in _member_cache:
+        return _member_cache[user_id]
+    try:
+        member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        name = member.display_name
+    except discord.NotFound:
+        name = f"usuario {user_id}"
+    _member_cache[user_id] = name
+    return name
+
+
+def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discord.Client, guild_id: int):
+    global _client
+    _client = client
+
+    @tree.command(name="abrir_anotacion", description="Abre la anotación para una partida/evento del 7DL", guild=discord.Object(id=guild_id))
+    @discord.app_commands.describe(
+        evento="Nombre del evento (ej: 7dl vs 360)",
+        cierra="Cuándo cierra, formato DD/MM HH:MM en hora Argentina (ej: 15/09 20:00)",
+        imagen="Imagen/banner opcional para el evento (subila directo acá)",
+    )
+    async def abrir_anotacion(interaction: discord.Interaction, evento: str, cierra: str, imagen: discord.Attachment | None = None):
+        closes_at = parse_cierre(cierra)
+        if not closes_at:
+            await interaction.response.send_message(
+                "No pude entender esa fecha. Usá el formato `DD/MM HH:MM` (ej: `15/09 20:00`), hora Argentina.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
+
+        event = {
+            "evento": evento,
+            "channel_id": interaction.channel_id,
+            "closes_at": closes_at.isoformat(),
+            "closed": False,
+            "image_url": imagen.url if imagen else None,
+            "signups": {EMOJI_VOY: [], EMOJI_TENTATIVO: [], EMOJI_NO_VOY: [], EMOJI_TANQUE: []},
+        }
+        embed = build_embed(event)
+        message = await interaction.followup.send(embed=embed, wait=True)
+        for emoji in ALL_TRACKED_EMOJIS:
+            await message.add_reaction(emoji)
+
+        events = load_events()
+        events[str(message.id)] = event
+        save_events(events)
+
+    @tree.command(name="cerrar_anotacion", description="Cierra manualmente una anotación abierta en este canal", guild=discord.Object(id=guild_id))
+    async def cerrar_anotacion(interaction: discord.Interaction):
+        events = load_events()
+        match = next(
+            (mid for mid, ev in events.items() if ev["channel_id"] == interaction.channel_id and not ev["closed"]),
+            None,
+        )
+        if not match:
+            await interaction.response.send_message("No hay ninguna anotación abierta en este canal.", ephemeral=True)
+            return
+
+        events[match]["closes_at"] = datetime.now(timezone.utc).isoformat()
+        save_events(events)
+        await interaction.response.send_message("Cerrando la anotación ahora mismo...", ephemeral=True)
+
+
+async def _refresh_message(channel: discord.TextChannel, message_id: int, event: dict):
+    try:
+        message = await channel.fetch_message(message_id)
+        await message.edit(embed=build_embed(event))
+    except Exception:
+        pass
+
+
+async def handle_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == _client.user.id:
+        return
+    emoji_key = str(payload.emoji)
+    if emoji_key not in ALL_TRACKED_EMOJIS:
+        return
+
+    events = load_events()
+    event = events.get(str(payload.message_id))
+    if not event or event["closed"]:
+        return
+
+    channel = _client.get_channel(payload.channel_id)
+    guild = _client.get_guild(payload.guild_id)
+    name = await _get_display_name(guild, payload.user_id)
+    entry = f"{payload.user_id}:{name}"
+
+    # Si es una reacción de asistencia (Voy/Tentativo/No voy), mantiene una
+    # sola activa por persona -- saca las otras dos. El tanque queda aparte,
+    # no se toca (se puede combinar libremente con cualquier estado de asistencia).
+    if emoji_key in EXCLUSIVE_EMOJIS:
+        try:
+            message = await channel.fetch_message(payload.message_id)
+            member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
+            for other_emoji in EXCLUSIVE_EMOJIS - {emoji_key}:
+                try:
+                    await message.remove_reaction(other_emoji, member)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        for status in EXCLUSIVE_EMOJIS:
+            if entry in event["signups"].get(status, []):
+                event["signups"][status].remove(entry)
+
+    event["signups"].setdefault(emoji_key, [])
+    if entry not in event["signups"][emoji_key]:
+        event["signups"][emoji_key].append(entry)
+
+    events[str(payload.message_id)] = event
+    save_events(events)
+    await _refresh_message(channel, payload.message_id, event)
+
+
+async def handle_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.user_id == _client.user.id:
+        return
+    emoji_key = str(payload.emoji)
+    if emoji_key not in ALL_TRACKED_EMOJIS:
+        return
+
+    events = load_events()
+    event = events.get(str(payload.message_id))
+    if not event or event["closed"]:
+        return
+
+    guild = _client.get_guild(payload.guild_id)
+    name = await _get_display_name(guild, payload.user_id)
+    entry = f"{payload.user_id}:{name}"
+
+    if entry in event["signups"].get(emoji_key, []):
+        event["signups"][emoji_key].remove(entry)
+
+    events[str(payload.message_id)] = event
+    save_events(events)
+    channel = _client.get_channel(payload.channel_id)
+    await _refresh_message(channel, payload.message_id, event)
+
+
+async def roster_check_loop():
+    """Se llama cada 30s desde el bot principal -- cierra las anotaciones vencidas."""
+    events = load_events()
+    now = datetime.now(timezone.utc)
+    changed = False
+
+    for message_id, event in events.items():
+        if event["closed"]:
+            continue
+        closes_at = datetime.fromisoformat(event["closes_at"])
+        if now < closes_at:
+            continue
+
+        event["closed"] = True
+        changed = True
+        channel = _client.get_channel(event["channel_id"])
+        if not channel:
+            continue
+
+        await _refresh_message(channel, int(message_id), event)
+
+        accepted_names = [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_VOY, [])]
+        ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, accepted_names)
+
+        sheet_link = f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/edit" if ROSTER_SHEET_ID else ""
+        mencion = f"<@&{OFICIALES_ROLE_ID}> " if OFICIALES_ROLE_ID else ""
+
+        if ok:
+            texto = (
+                f"{mencion}📋 Cerró la anotación de **{event['evento']}** — "
+                f"{len(accepted_names)} anotados. Ya está la lista en la planilla, se puede armar el roster.\n{sheet_link}"
+            )
+        else:
+            texto = (
+                f"{mencion}📋 Cerró la anotación de **{event['evento']}** — {len(accepted_names)} anotados.\n"
+                f"⚠️ No se pudo escribir en la planilla automáticamente ({msg}). Anotados:\n"
+                + "\n".join(accepted_names or ["(nadie se anotó)"])
+            )
+        try:
+            await channel.send(texto)
+        except Exception:
+            pass
+
+    if changed:
+        save_events(events)

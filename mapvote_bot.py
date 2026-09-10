@@ -155,6 +155,49 @@ def get_top_maps(state: dict) -> list[tuple[str, str, str, int]]:
     return selected
 
 
+def build_rotation_order(state: dict) -> list[str]:
+    """
+    Arma el orden EXACTO en que se cargan los mapas en el CRCON: bloques de
+    Warfare intercalados con Offensive (ej. con 6 Warfare / 2 Offensive da
+    W-W-W-O-W-W-W-O), en vez del orden de votos. Sirve para que el Offensive
+    quede como "corte" entre tandas de Warfare en vez de ir todo junto.
+    Devuelve solo los crcon_id, en el orden final a aplicar.
+    """
+    warfare = [
+        (name, emoji, crcon_id, len(state["votes"].get(emoji, [])))
+        for name, emoji, crcon_id, category in MAPS
+        if category == "warfare"
+    ]
+    offensive = [
+        (name, emoji, crcon_id, len(state["votes"].get(emoji, [])))
+        for name, emoji, crcon_id, category in MAPS
+        if category == "offensive"
+    ]
+    warfare.sort(key=lambda x: x[3], reverse=True)
+    offensive.sort(key=lambda x: x[3], reverse=True)
+
+    # Solo entran los que efectivamente tuvieron al menos 1 voto
+    warfare_sel = [m for m in warfare[:WARFARE_SLOTS] if m[3] > 0]
+    offensive_sel = [m for m in offensive[:OFFENSIVE_SLOTS] if m[3] > 0]
+
+    if not offensive_sel:
+        return [m[2] for m in warfare_sel]
+
+    n_off = len(offensive_sel)
+    block = len(warfare_sel) // n_off
+    extra = len(warfare_sel) % n_off  # si no divide justo, los primeros bloques absorben el resto
+
+    ids: list[str] = []
+    w_idx = 0
+    for i in range(n_off):
+        take = block + (1 if i < extra else 0)
+        ids.extend(m[2] for m in warfare_sel[w_idx:w_idx + take])
+        w_idx += take
+        ids.append(offensive_sel[i][2])
+    ids.extend(m[2] for m in warfare_sel[w_idx:])  # por si sobrara alguno
+    return ids
+
+
 # =========================================================================
 # Integración con la API del CRCON
 # =========================================================================
@@ -488,8 +531,8 @@ async def poll_loop():
     # Edita el mensaje mostrando la rotación resultante arriba
     await refresh_poll_message(channel)
 
-    # Aplica la rotación en el CRCON de verdad
-    map_ids = [crcon_id for _, _, crcon_id, votes in top_maps if votes > 0]
+    # Aplica la rotación en el CRCON, en el orden W-W-W-O-W-W-W-O (no por votos)
+    map_ids = build_rotation_order(state)
     result_msg = await apply_rotation_to_crcon(map_ids)
     print(result_msg)
 

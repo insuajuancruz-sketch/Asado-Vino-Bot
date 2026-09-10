@@ -43,6 +43,8 @@ import aiohttp
 import discord
 from discord.ext import tasks
 
+import vip_shop
+
 # =========================================================================
 # CONFIGURACIÓN — editar estos valores
 # =========================================================================
@@ -52,6 +54,10 @@ BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "PEGA_TU_TOKEN_ACA")
 # ID del canal donde se postea la encuesta (Modo Desarrollador -> click derecho
 # sobre el canal -> Copiar ID de canal)
 CHANNEL_ID = 1544782617940074587  # #votemap
+
+# Canal donde se avisa cada vez que se procesa una compra de VIP (log para admins).
+# Poner None si no querés este aviso.
+VIP_LOG_CHANNEL_ID = 1547710559644946553  # #admin-registro-vip
 
 # URL pública del banner al pie del embed. Poner None si no querés banner.
 BANNER_URL = "https://cdn.jsdelivr.net/gh/insuajuancruz-sketch/Asado-Vino-Bot@main/BannerAsado2.png"
@@ -418,8 +424,10 @@ async def on_ready():
         else:
             await post_new_poll(channel)
     poll_loop.start()
+    vip_shop.setup_vip_commands(tree, client, GUILD_ID, VIP_LOG_CHANNEL_ID)
     await tree.sync(guild=discord.Object(id=GUILD_ID))
     print("Comandos / sincronizados")
+    await vip_shop.start_webhook_server()
 
 
 @tree.command(

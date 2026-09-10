@@ -66,6 +66,10 @@ ROSTER_SHEET_TAB = "Anotados"
 # oficiales/mariscales, o None para no mencionar a nadie en particular.
 OFICIALES_ROLE_ID = None  # <-- reemplazar por el ID del rol si querés
 
+# Duración estimada del partido, para calcular el fin del Evento nativo de
+# Discord (Discord exige una hora de fin para eventos externos)
+MATCH_DURATION_HOURS = 2
+
 # Hora Argentina = UTC-3 todo el año (no tiene horario de verano)
 ARG_OFFSET = timedelta(hours=-3)
 
@@ -97,6 +101,26 @@ def load_events() -> dict:
 def save_events(events: dict):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(events, f, ensure_ascii=False, indent=2)
+
+
+# Cache en memoria -- es la fuente de verdad mientras el bot corre. Evita una
+# condición de carrera real: si cada reacción recargara el archivo del disco,
+# dos eventos que llegan casi al mismo tiempo (por ejemplo, el nuestro propio
+# al sacar una reacción exclusiva) podían pisarse la escritura entre sí y
+# perder anotados. Se persiste a disco en cada cambio, pero se LEE siempre
+# de acá, nunca releyendo el archivo en cada reacción.
+_events_cache: dict | None = None
+
+
+def get_events() -> dict:
+    global _events_cache
+    if _events_cache is None:
+        _events_cache = load_events()
+    return _events_cache
+
+
+def persist_events():
+    save_events(_events_cache or {})
 
 
 def parse_cierre(cierre_str: str) -> datetime | None:
@@ -139,10 +163,10 @@ def build_embed(event: dict) -> discord.Embed:
             return "—"
         return "\n".join(e.split(":", 1)[1] for e in entries)
 
-    embed.add_field(name=f"{EMOJI_VOY} Voy ({len(event['signups'].get(EMOJI_VOY, []))})", value=names_list(EMOJI_VOY), inline=True)
+    embed.add_field(name=f"{EMOJI_VOY} Confirmar ({len(event['signups'].get(EMOJI_VOY, []))})", value=names_list(EMOJI_VOY), inline=True)
     embed.add_field(name=f"{EMOJI_TENTATIVO} Tentativo ({len(event['signups'].get(EMOJI_TENTATIVO, []))})", value=names_list(EMOJI_TENTATIVO), inline=True)
-    embed.add_field(name=f"{EMOJI_NO_VOY} No voy ({len(event['signups'].get(EMOJI_NO_VOY, []))})", value=names_list(EMOJI_NO_VOY), inline=True)
-    embed.add_field(name=f"{EMOJI_TANQUE} Anotado para tanque ({len(event['signups'].get(EMOJI_TANQUE, []))})", value=names_list(EMOJI_TANQUE), inline=False)
+    embed.add_field(name=f"{EMOJI_NO_VOY} Denegar ({len(event['signups'].get(EMOJI_NO_VOY, []))})", value=names_list(EMOJI_NO_VOY), inline=True)
+    embed.add_field(name=f"{EMOJI_TANQUE} Blindaje ({len(event['signups'].get(EMOJI_TANQUE, []))})", value=names_list(EMOJI_TANQUE), inline=False)
 
     if event.get("image_url"):
         embed.set_image(url=event["image_url"])
@@ -219,14 +243,29 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
     @tree.command(name="abrir_anotacion", description="Abre la anotación para una partida/evento del 7DL", guild=discord.Object(id=guild_id))
     @discord.app_commands.describe(
         evento="Nombre del evento (ej: 7dl vs 360)",
-        cierra="Cuándo cierra, formato DD/MM HH:MM en hora Argentina (ej: 15/09 20:00)",
+        cierra="Cuándo cierra la anotación, formato DD/MM HH:MM en hora Argentina (ej: 15/09 20:00)",
+        hora_partido="Cuándo arranca el partido, formato DD/MM HH:MM en hora Argentina (ej: 15/09 21:00)",
         imagen="Imagen/banner opcional para el evento (subila directo acá)",
     )
-    async def abrir_anotacion(interaction: discord.Interaction, evento: str, cierra: str, imagen: discord.Attachment | None = None):
+    async def abrir_anotacion(
+        interaction: discord.Interaction,
+        evento: str,
+        cierra: str,
+        hora_partido: str,
+        imagen: discord.Attachment | None = None,
+    ):
         closes_at = parse_cierre(cierra)
         if not closes_at:
             await interaction.response.send_message(
-                "No pude entender esa fecha. Usá el formato `DD/MM HH:MM` (ej: `15/09 20:00`), hora Argentina.",
+                "No pude entender la fecha de cierre. Usá el formato `DD/MM HH:MM` (ej: `15/09 20:00`), hora Argentina.",
+                ephemeral=True,
+            )
+            return
+
+        match_at = parse_cierre(hora_partido)
+        if not match_at:
+            await interaction.response.send_message(
+                "No pude entender la hora del partido. Usá el formato `DD/MM HH:MM` (ej: `15/09 21:00`), hora Argentina.",
                 ephemeral=True,
             )
             return
@@ -246,13 +285,29 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         for emoji in ALL_TRACKED_EMOJIS:
             await message.add_reaction(emoji)
 
-        events = load_events()
+        events = get_events()
         events[str(message.id)] = event
-        save_events(events)
+        persist_events()
+
+        # Crea también el Evento nativo de Discord, para que le llegue la
+        # notificación automática a quien tenga esa opción activada, y
+        # aparezca en la lista de Eventos del servidor.
+        try:
+            await interaction.guild.create_scheduled_event(
+                name=evento,
+                description=f"Anotate reaccionando en {message.jump_url}",
+                start_time=match_at,
+                end_time=match_at + timedelta(hours=MATCH_DURATION_HOURS),
+                entity_type=discord.EntityType.external,
+                location=evento,
+                privacy_level=discord.PrivacyLevel.guild_only,
+            )
+        except Exception as error:
+            print(f"No se pudo crear el Evento nativo de Discord: {error}")
 
     @tree.command(name="cerrar_anotacion", description="Cierra manualmente una anotación abierta en este canal", guild=discord.Object(id=guild_id))
     async def cerrar_anotacion(interaction: discord.Interaction):
-        events = load_events()
+        events = get_events()
         match = next(
             (mid for mid, ev in events.items() if ev["channel_id"] == interaction.channel_id and not ev["closed"]),
             None,
@@ -262,7 +317,7 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             return
 
         events[match]["closes_at"] = datetime.now(timezone.utc).isoformat()
-        save_events(events)
+        persist_events()
         await interaction.response.send_message("Cerrando la anotación ahora mismo...", ephemeral=True)
 
 
@@ -281,7 +336,7 @@ async def handle_reaction_add(payload: discord.RawReactionActionEvent):
     if emoji_key not in ALL_TRACKED_EMOJIS:
         return
 
-    events = load_events()
+    events = get_events()
     event = events.get(str(payload.message_id))
     if not event or event["closed"]:
         return
@@ -291,9 +346,24 @@ async def handle_reaction_add(payload: discord.RawReactionActionEvent):
     name = await _get_display_name(guild, payload.user_id)
     entry = f"{payload.user_id}:{name}"
 
-    # Si es una reacción de asistencia (Voy/Tentativo/No voy), mantiene una
-    # sola activa por persona -- saca las otras dos. El tanque queda aparte,
-    # no se toca (se puede combinar libremente con cualquier estado de asistencia).
+    # Actualiza el estado en memoria PRIMERO, antes de tocar Discord -- así,
+    # si sacar la reacción vieja dispara un evento recursivo (ver abajo), ese
+    # evento va a encontrar el dato ya correcto en vez de pisarlo.
+    if emoji_key in EXCLUSIVE_EMOJIS:
+        for status in EXCLUSIVE_EMOJIS:
+            if entry in event["signups"].get(status, []):
+                event["signups"][status].remove(entry)
+
+    event["signups"].setdefault(emoji_key, [])
+    if entry not in event["signups"][emoji_key]:
+        event["signups"][emoji_key].append(entry)
+
+    persist_events()
+    await _refresh_message(channel, payload.message_id, event)
+
+    # Si es una reacción de asistencia (Confirmar/Denegar/Tentativo), mantiene
+    # una sola activa por persona -- saca las otras dos en Discord. El
+    # Blindaje queda aparte, se puede combinar con cualquier estado.
     if emoji_key in EXCLUSIVE_EMOJIS:
         try:
             message = await channel.fetch_message(payload.message_id)
@@ -306,18 +376,6 @@ async def handle_reaction_add(payload: discord.RawReactionActionEvent):
         except Exception:
             pass
 
-        for status in EXCLUSIVE_EMOJIS:
-            if entry in event["signups"].get(status, []):
-                event["signups"][status].remove(entry)
-
-    event["signups"].setdefault(emoji_key, [])
-    if entry not in event["signups"][emoji_key]:
-        event["signups"][emoji_key].append(entry)
-
-    events[str(payload.message_id)] = event
-    save_events(events)
-    await _refresh_message(channel, payload.message_id, event)
-
 
 async def handle_reaction_remove(payload: discord.RawReactionActionEvent):
     if payload.user_id == _client.user.id:
@@ -326,7 +384,7 @@ async def handle_reaction_remove(payload: discord.RawReactionActionEvent):
     if emoji_key not in ALL_TRACKED_EMOJIS:
         return
 
-    events = load_events()
+    events = get_events()
     event = events.get(str(payload.message_id))
     if not event or event["closed"]:
         return
@@ -338,15 +396,14 @@ async def handle_reaction_remove(payload: discord.RawReactionActionEvent):
     if entry in event["signups"].get(emoji_key, []):
         event["signups"][emoji_key].remove(entry)
 
-    events[str(payload.message_id)] = event
-    save_events(events)
+    persist_events()
     channel = _client.get_channel(payload.channel_id)
     await _refresh_message(channel, payload.message_id, event)
 
 
 async def roster_check_loop():
     """Se llama cada 30s desde el bot principal -- cierra las anotaciones vencidas."""
-    events = load_events()
+    events = get_events()
     now = datetime.now(timezone.utc)
     changed = False
 
@@ -365,8 +422,8 @@ async def roster_check_loop():
 
         await _refresh_message(channel, int(message_id), event)
 
-        accepted_names = [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_VOY, [])]
-        ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, accepted_names)
+        confirmed_names = [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_VOY, [])]
+        ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, confirmed_names)
 
         sheet_link = f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/edit" if ROSTER_SHEET_ID else ""
         mencion = f"<@&{OFICIALES_ROLE_ID}> " if OFICIALES_ROLE_ID else ""
@@ -374,13 +431,13 @@ async def roster_check_loop():
         if ok:
             texto = (
                 f"{mencion}📋 Cerró la anotación de **{event['evento']}** — "
-                f"{len(accepted_names)} anotados. Ya está la lista en la planilla, se puede armar el roster.\n{sheet_link}"
+                f"{len(confirmed_names)} confirmados. Ya está la lista en la planilla, se puede armar el roster.\n{sheet_link}"
             )
         else:
             texto = (
-                f"{mencion}📋 Cerró la anotación de **{event['evento']}** — {len(accepted_names)} anotados.\n"
-                f"⚠️ No se pudo escribir en la planilla automáticamente ({msg}). Anotados:\n"
-                + "\n".join(accepted_names or ["(nadie se anotó)"])
+                f"{mencion}📋 Cerró la anotación de **{event['evento']}** — {len(confirmed_names)} confirmados.\n"
+                f"⚠️ No se pudo escribir en la planilla automáticamente ({msg}). Confirmados:\n"
+                + "\n".join(confirmed_names or ["(nadie se anotó)"])
             )
         try:
             await channel.send(texto)
@@ -388,4 +445,4 @@ async def roster_check_loop():
             pass
 
     if changed:
-        save_events(events)
+        persist_events()

@@ -44,6 +44,7 @@ import discord
 from discord.ext import tasks
 
 import vip_shop
+import roster_signup
 
 # =========================================================================
 # CONFIGURACIÓN — editar estos valores
@@ -424,7 +425,9 @@ async def on_ready():
         else:
             await post_new_poll(channel)
     poll_loop.start()
+    roster_loop.start()
     vip_shop.setup_vip_commands(tree, client, GUILD_ID, VIP_LOG_CHANNEL_ID)
+    roster_signup.setup_roster_commands(tree, client, GUILD_ID)
     await tree.sync(guild=discord.Object(id=GUILD_ID))
     print("Comandos / sincronizados")
     await vip_shop.start_webhook_server()
@@ -475,48 +478,46 @@ async def votemap_cerrar_en_error(interaction: discord.Interaction, error: disco
 
 @client.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if payload.channel_id != CHANNEL_ID or payload.message_id != state.get("message_id"):
-        return
     if payload.user_id == client.user.id:
         return
-    if state.get("closed"):
-        return
 
-    emoji_key = str(payload.emoji)
-    if emoji_key not in state["votes"]:
-        return
+    if payload.channel_id == CHANNEL_ID and payload.message_id == state.get("message_id") and not state.get("closed"):
+        emoji_key = str(payload.emoji)
+        if emoji_key in state["votes"]:
+            guild = client.get_guild(payload.guild_id)
+            name = await get_display_name(guild, payload.user_id)
+            entry = f"{payload.user_id}:{name}"
+            if entry not in state["votes"][emoji_key]:
+                state["votes"][emoji_key].append(entry)
+            save_state(state)
+            channel = client.get_channel(payload.channel_id)
+            await refresh_poll_message(channel)
+            return  # ya se resolvió como voto de mapas
 
-    guild = client.get_guild(payload.guild_id)
-    name = await get_display_name(guild, payload.user_id)
-    entry = f"{payload.user_id}:{name}"
-    if entry not in state["votes"][emoji_key]:
-        state["votes"][emoji_key].append(entry)
-    save_state(state)
-
-    channel = client.get_channel(payload.channel_id)
-    await refresh_poll_message(channel)
+    await roster_signup.handle_reaction_add(payload)
 
 
 @client.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
-    if payload.channel_id != CHANNEL_ID or payload.message_id != state.get("message_id"):
-        return
-    if state.get("closed"):
-        return
+    if payload.channel_id == CHANNEL_ID and payload.message_id == state.get("message_id") and not state.get("closed"):
+        emoji_key = str(payload.emoji)
+        if emoji_key in state["votes"]:
+            guild = client.get_guild(payload.guild_id)
+            name = await get_display_name(guild, payload.user_id)
+            entry = f"{payload.user_id}:{name}"
+            if entry in state["votes"][emoji_key]:
+                state["votes"][emoji_key].remove(entry)
+                save_state(state)
+            channel = client.get_channel(payload.channel_id)
+            await refresh_poll_message(channel)
+            return  # ya se resolvió como voto de mapas
 
-    emoji_key = str(payload.emoji)
-    if emoji_key not in state["votes"]:
-        return
+    await roster_signup.handle_reaction_remove(payload)
 
-    guild = client.get_guild(payload.guild_id)
-    name = await get_display_name(guild, payload.user_id)
-    entry = f"{payload.user_id}:{name}"
-    if entry in state["votes"][emoji_key]:
-        state["votes"][emoji_key].remove(entry)
-        save_state(state)
 
-    channel = client.get_channel(payload.channel_id)
-    await refresh_poll_message(channel)
+@tasks.loop(seconds=30)
+async def roster_loop():
+    await roster_signup.roster_check_loop()
 
 
 @tasks.loop(seconds=30)

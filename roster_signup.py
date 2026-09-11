@@ -340,7 +340,11 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         try:
             ws = sh.worksheet(ROSTER_SHEET_TAB)
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=ROSTER_SHEET_TAB, rows=500, cols=3)
+            try:
+                ws = sh.add_worksheet(title=ROSTER_SHEET_TAB, rows=500, cols=3)
+            except Exception:
+                # Alguien ya la creó justo antes (o quedó de una corrida anterior) -- la usamos.
+                ws = sh.worksheet(ROSTER_SHEET_TAB)
 
         existing = ws.get_all_values()
         start_row = len(existing) + 2  # deja una fila en blanco de separador

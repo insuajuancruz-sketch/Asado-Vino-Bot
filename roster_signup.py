@@ -341,19 +341,22 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         client = gspread.authorize(creds)
 
         sh = client.open_by_key(ROSTER_SHEET_ID)
-        try:
-            ws = sh.worksheet(ROSTER_SHEET_TAB)
-        except gspread.WorksheetNotFound:
+        ws = None
+        for hoja in sh.worksheets():  # lista fresca y completa -- no depende del lookup por nombre, que resultó no ser confiable
+            if hoja.title == ROSTER_SHEET_TAB:
+                ws = hoja
+                break
+        if ws is None:
             try:
                 ws = sh.add_worksheet(title=ROSTER_SHEET_TAB, rows=500, cols=3)
             except Exception as add_error:
-                # Puede fallar porque ya existía (raro pero posible) -- probamos
-                # buscarla de nuevo antes de rendirnos. Si sigue sin existir,
-                # mostramos el error REAL de add_worksheet (ej: permisos),
-                # en vez de un mensaje vacío que no dice nada.
-                try:
-                    ws = sh.worksheet(ROSTER_SHEET_TAB)
-                except Exception:
+                # Puede que ya exista pero no se haya visto en la lista de arriba
+                # por algún desfasaje momentáneo -- pedimos la lista de nuevo.
+                for hoja in sh.worksheets():
+                    if hoja.title == ROSTER_SHEET_TAB:
+                        ws = hoja
+                        break
+                if ws is None:
                     return False, f"No se pudo crear la pestaña '{ROSTER_SHEET_TAB}': {add_error}"
 
         existing = ws.get_all_values()

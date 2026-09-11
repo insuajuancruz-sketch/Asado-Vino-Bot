@@ -437,9 +437,14 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         mencionar2: discord.Role | None = None,
         mencionar3: discord.Role | None = None,
     ):
+        # Responde/reserva la interacción DE INMEDIATO -- Discord exige una
+        # respuesta en 3 segundos, y no queremos que ninguna validación previa
+        # (por rápida que sea) arriesgue pasarse de ese margen.
+        await interaction.response.defer()
+
         closes_at = parse_cierre(cierra)
         if not closes_at:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "No pude entender la fecha de cierre. Usá el formato `DD/MM HH:MM` (ej: `15/09 20:00`), hora Argentina.",
                 ephemeral=True,
             )
@@ -447,13 +452,11 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
 
         match_at = parse_cierre(hora_partido)
         if not match_at:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "No pude entender la hora del partido. Usá el formato `DD/MM HH:MM` (ej: `15/09 21:00`), hora Argentina.",
                 ephemeral=True,
             )
             return
-
-        await interaction.response.defer()
 
         event = {
             "evento": evento,
@@ -502,18 +505,20 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
 
     @tree.command(name="cerrar_anotacion", description="Cierra manualmente una anotación abierta en este canal", guild=discord.Object(id=guild_id))
     async def cerrar_anotacion(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
         events = get_events()
         match = next(
             (mid for mid, ev in events.items() if ev["channel_id"] == interaction.channel_id and not ev["closed"]),
             None,
         )
         if not match:
-            await interaction.response.send_message("No hay ninguna anotación abierta en este canal.", ephemeral=True)
+            await interaction.followup.send("No hay ninguna anotación abierta en este canal.", ephemeral=True)
             return
 
         events[match]["closes_at"] = datetime.now(timezone.utc).isoformat()
         persist_events()
-        await interaction.response.send_message("Cerrando la anotación ahora mismo...", ephemeral=True)
+        await interaction.followup.send("Cerrando la anotación ahora mismo...", ephemeral=True)
 
 
 async def _refresh_message(channel: discord.TextChannel, message_id: int, event: dict):

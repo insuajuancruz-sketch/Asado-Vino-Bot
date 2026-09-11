@@ -341,6 +341,8 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         return False, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
 
     try:
+        import time as _time
+
         import gspread
         from google.oauth2.service_account import Credentials
 
@@ -350,20 +352,26 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         client = gspread.authorize(creds)
 
         sh = client.open_by_key(ROSTER_SHEET_ID)
-        ws = None
-        for hoja in sh.worksheets():  # lista fresca y completa -- no depende del lookup por nombre, que resultó no ser confiable
-            if hoja.title == ROSTER_SHEET_TAB:
-                ws = hoja
-                break
+
+        def buscar_pestaña():
+            for hoja in sh.worksheets():  # lista fresca -- no depende del lookup por nombre, que resultó no ser confiable
+                if hoja.title == ROSTER_SHEET_TAB:
+                    return hoja
+            return None
+
+        ws = buscar_pestaña()
         if ws is None:
             try:
                 ws = sh.add_worksheet(title=ROSTER_SHEET_TAB, rows=500, cols=3)
             except Exception as add_error:
-                # Puede que ya exista pero no se haya visto en la lista de arriba
-                # por algún desfasaje momentáneo -- pedimos la lista de nuevo.
-                for hoja in sh.worksheets():
-                    if hoja.title == ROSTER_SHEET_TAB:
-                        ws = hoja
+                # Puede que ya exista del lado de Google pero la lista de recién
+                # todavía no lo reflejara (desfasaje momentáneo entre sistemas
+                # internos de Google) -- reintentamos la búsqueda un par de veces
+                # con una pequeña espera antes de rendirnos.
+                for intento in range(3):
+                    _time.sleep(1.5)
+                    ws = buscar_pestaña()
+                    if ws is not None:
                         break
                 if ws is None:
                     return False, f"No se pudo crear la pestaña '{ROSTER_SHEET_TAB}': {add_error}"

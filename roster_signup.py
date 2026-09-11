@@ -98,6 +98,10 @@ UNIDADES = [
 EXCLUSIVE_EMOJIS = {emoji for _, emoji in UNIDADES} | {EMOJI_CANCELADO, EMOJI_TENTATIVO}
 ALL_TRACKED_EMOJIS = EXCLUSIVE_EMOJIS  # acá no hay categoría independiente, todo es un solo grupo excluyente
 
+# Lista (con orden fijo) para agregar las reacciones en el mismo orden en que
+# se muestran los campos del embed -- un `set` no garantiza ningún orden.
+ORDERED_EMOJIS = [emoji for _, emoji in UNIDADES] + [EMOJI_TENTATIVO, EMOJI_CANCELADO]
+
 _EMOJI_TO_LABEL = {emoji: nombre for nombre, emoji in UNIDADES}
 _EMOJI_TO_LABEL[EMOJI_CANCELADO] = "CANCELADO"
 _EMOJI_TO_LABEL[EMOJI_TENTATIVO] = "TENTATIVO"
@@ -342,9 +346,15 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         except gspread.WorksheetNotFound:
             try:
                 ws = sh.add_worksheet(title=ROSTER_SHEET_TAB, rows=500, cols=3)
-            except Exception:
-                # Alguien ya la creó justo antes (o quedó de una corrida anterior) -- la usamos.
-                ws = sh.worksheet(ROSTER_SHEET_TAB)
+            except Exception as add_error:
+                # Puede fallar porque ya existía (raro pero posible) -- probamos
+                # buscarla de nuevo antes de rendirnos. Si sigue sin existir,
+                # mostramos el error REAL de add_worksheet (ej: permisos),
+                # en vez de un mensaje vacío que no dice nada.
+                try:
+                    ws = sh.worksheet(ROSTER_SHEET_TAB)
+                except Exception:
+                    return False, f"No se pudo crear la pestaña '{ROSTER_SHEET_TAB}': {add_error}"
 
         existing = ws.get_all_values()
         start_row = len(existing) + 2  # deja una fila en blanco de separador
@@ -447,7 +457,7 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         roles_a_mencionar = [r for r in (mencionar1, mencionar2, mencionar3) if r]
         contenido = f"{' '.join(r.mention for r in roles_a_mencionar)} 📋 ¡Nueva anotación abierta!" if roles_a_mencionar else None
         message = await interaction.followup.send(content=contenido, embed=embed, wait=True)
-        for emoji in ALL_TRACKED_EMOJIS:
+        for emoji in ORDERED_EMOJIS:
             await message.add_reaction(emoji)
 
         events = get_events()
@@ -512,7 +522,24 @@ async def register_persistent_views(client: discord.Client):
             client.add_view(EditEventView(int(message_id)), message_id=int(message_id))
 
 
+# Serializa el procesamiento de reacciones -- sin esto, si alguien reacciona
+# a una opción y enseguida cambia a otra, dos manejos de reacción pueden
+# solaparse (cada uno sacando reacciones del otro en Discord) y terminar
+# desincronizando el estado interno de lo que realmente queda en el mensaje.
+_reaction_lock = asyncio.Lock()
+
+
 async def handle_reaction_add(payload: discord.RawReactionActionEvent):
+    async with _reaction_lock:
+        await _handle_reaction_add(payload)
+
+
+async def handle_reaction_remove(payload: discord.RawReactionActionEvent):
+    async with _reaction_lock:
+        await _handle_reaction_remove(payload)
+
+
+async def _handle_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.user_id == _client.user.id:
         return
     emoji_key = str(payload.emoji)
@@ -560,7 +587,7 @@ async def handle_reaction_add(payload: discord.RawReactionActionEvent):
             pass
 
 
-async def handle_reaction_remove(payload: discord.RawReactionActionEvent):
+async def _handle_reaction_remove(payload: discord.RawReactionActionEvent):
     if payload.user_id == _client.user.id:
         return
     emoji_key = str(payload.emoji)

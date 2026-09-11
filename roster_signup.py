@@ -156,6 +156,13 @@ def build_embed(event: dict) -> discord.Embed:
         value=f"<t:{int(closes_at.timestamp())}:F> (<t:{int(closes_at.timestamp())}:R>)",
         inline=False,
     )
+    if event.get("match_at"):
+        match_at = datetime.fromisoformat(event["match_at"])
+        embed.add_field(
+            name="🎮 Hora del partido",
+            value=f"<t:{int(match_at.timestamp())}:F> (<t:{int(match_at.timestamp())}:R>)",
+            inline=False,
+        )
 
     def names_list(status: str) -> str:
         entries = event["signups"].get(status, [])
@@ -173,6 +180,112 @@ def build_embed(event: dict) -> discord.Embed:
 
     embed.set_footer(text=f"state:{event['closes_at']}|{int(closed)}")
     return embed
+
+
+# =========================================================================
+# Botón + formulario para editar un evento ya creado
+# =========================================================================
+
+def _can_edit(interaction: discord.Interaction) -> bool:
+    if interaction.user.guild_permissions.manage_guild:
+        return True
+    if OFICIALES_ROLE_ID and any(r.id == OFICIALES_ROLE_ID for r in interaction.user.roles):
+        return True
+    return False
+
+
+class EditEventModal(discord.ui.Modal):
+    def __init__(self, message_id: int, event: dict):
+        super().__init__(title="Editar evento")
+        self.message_id = message_id
+
+        closes_local = datetime.fromisoformat(event["closes_at"]).astimezone(timezone(ARG_OFFSET))
+        match_local = (
+            datetime.fromisoformat(event["match_at"]).astimezone(timezone(ARG_OFFSET))
+            if event.get("match_at")
+            else None
+        )
+
+        self.nombre = discord.ui.TextInput(label="Nombre del evento", default=event["evento"], max_length=100)
+        self.cierra = discord.ui.TextInput(label="Cierra anotación (DD/MM HH:MM, ARG)", default=closes_local.strftime("%d/%m %H:%M"))
+        self.partido = discord.ui.TextInput(
+            label="Hora del partido (DD/MM HH:MM, ARG)",
+            default=match_local.strftime("%d/%m %H:%M") if match_local else "",
+            required=False,
+        )
+        self.add_item(self.nombre)
+        self.add_item(self.cierra)
+        self.add_item(self.partido)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_closes = parse_cierre(self.cierra.value)
+        if not new_closes:
+            await interaction.response.send_message(
+                "No pude leer la fecha de cierre, no se guardó ningún cambio.", ephemeral=True
+            )
+            return
+
+        new_match = parse_cierre(self.partido.value) if self.partido.value.strip() else None
+
+        events = get_events()
+        event = events.get(str(self.message_id))
+        if not event:
+            await interaction.response.send_message("Ese evento ya no existe.", ephemeral=True)
+            return
+
+        event["evento"] = self.nombre.value
+        event["closes_at"] = new_closes.isoformat()
+        if new_match:
+            event["match_at"] = new_match.isoformat()
+        persist_events()
+
+        channel = interaction.client.get_channel(event["channel_id"])
+        await _refresh_message(channel, self.message_id, event)
+
+        # Intenta actualizar también el Evento nativo de Discord, si existe
+        if event.get("discord_event_id") and new_match:
+            try:
+                sched = await interaction.guild.fetch_scheduled_event(event["discord_event_id"])
+                await sched.edit(
+                    name=event["evento"],
+                    start_time=new_match,
+                    end_time=new_match + timedelta(hours=MATCH_DURATION_HOURS),
+                )
+            except Exception as error:
+                print(f"No se pudo actualizar el Evento nativo de Discord: {error}")
+
+        await interaction.response.send_message("✅ Evento actualizado.", ephemeral=True)
+
+
+class EditEventView(discord.ui.View):
+    def __init__(self, message_id: int):
+        super().__init__(timeout=None)
+        self.message_id = message_id
+        button = discord.ui.Button(
+            label="✏️ Editar evento",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"roster_edit:{message_id}",
+        )
+        button.callback = self._on_click
+        self.add_item(button)
+
+    async def _on_click(self, interaction: discord.Interaction):
+        if not _can_edit(interaction):
+            await interaction.response.send_message(
+                "Solo un admin/oficial puede editar este evento.", ephemeral=True
+            )
+            return
+
+        events = get_events()
+        event = events.get(str(self.message_id))
+        if not event:
+            await interaction.response.send_message("No encontré este evento.", ephemeral=True)
+            return
+        if event["closed"]:
+            await interaction.response.send_message("Esta anotación ya cerró, no se puede editar.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(EditEventModal(self.message_id, event))
 
 
 # =========================================================================
@@ -276,8 +389,10 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "evento": evento,
             "channel_id": interaction.channel_id,
             "closes_at": closes_at.isoformat(),
+            "match_at": match_at.isoformat(),
             "closed": False,
             "image_url": imagen.url if imagen else None,
+            "discord_event_id": None,
             "signups": {EMOJI_VOY: [], EMOJI_TENTATIVO: [], EMOJI_NO_VOY: [], EMOJI_TANQUE: []},
         }
         embed = build_embed(event)
@@ -293,7 +408,7 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         # notificación automática a quien tenga esa opción activada, y
         # aparezca en la lista de Eventos del servidor.
         try:
-            await interaction.guild.create_scheduled_event(
+            sched = await interaction.guild.create_scheduled_event(
                 name=evento,
                 description=f"Anotate reaccionando en {message.jump_url}",
                 start_time=match_at,
@@ -302,8 +417,16 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
                 location=evento,
                 privacy_level=discord.PrivacyLevel.guild_only,
             )
+            event["discord_event_id"] = sched.id
+            persist_events()
         except Exception as error:
             print(f"No se pudo crear el Evento nativo de Discord: {error}")
+
+        # Adjunta el botón de editar y lo registra como persistente (sigue
+        # funcionando aunque el bot se reinicie).
+        view = EditEventView(message.id)
+        await message.edit(view=view)
+        client.add_view(view, message_id=message.id)
 
     @tree.command(name="cerrar_anotacion", description="Cierra manualmente una anotación abierta en este canal", guild=discord.Object(id=guild_id))
     async def cerrar_anotacion(interaction: discord.Interaction):
@@ -324,9 +447,19 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
 async def _refresh_message(channel: discord.TextChannel, message_id: int, event: dict):
     try:
         message = await channel.fetch_message(message_id)
-        await message.edit(embed=build_embed(event))
+        view = None if event["closed"] else EditEventView(message_id)
+        await message.edit(embed=build_embed(event), view=view)
     except Exception:
         pass
+
+
+async def register_persistent_views(client: discord.Client):
+    """Se llama una vez en on_ready -- vuelve a registrar los botones de
+    'Editar evento' de las anotaciones que sigan abiertas, para que sigan
+    funcionando después de un redeploy del bot."""
+    for message_id, event in get_events().items():
+        if not event.get("closed"):
+            client.add_view(EditEventView(int(message_id)), message_id=int(message_id))
 
 
 async def handle_reaction_add(payload: discord.RawReactionActionEvent):

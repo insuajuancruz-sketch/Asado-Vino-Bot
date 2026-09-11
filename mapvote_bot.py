@@ -413,6 +413,16 @@ async def rebuild_state_from_channel(channel: discord.TextChannel) -> dict | Non
 async def on_ready():
     global state
     print(f"Conectado como {client.user}")
+
+    # Arranca el servidor de webhooks PRIMERO QUE NADA -- Railway chequea
+    # periódicamente si el servicio responde en este puerto. Si el chequeo le
+    # pega antes de que el puerto esté escuchando (algo que puede pasar si
+    # esto arranca al final, después de la reconstrucción de votemap que
+    # tarda por los límites de velocidad de Discord), Railway asume que el
+    # servicio está caído y lo reinicia -- en bucle, sin dejarlo estabilizar
+    # nunca.
+    await vip_shop.start_webhook_server()
+
     channel = client.get_channel(CHANNEL_ID)
     loaded = load_state()
     if loaded:
@@ -431,7 +441,6 @@ async def on_ready():
     await roster_signup.register_persistent_views(client)
     await tree.sync(guild=discord.Object(id=GUILD_ID))
     print("Comandos / sincronizados")
-    await vip_shop.start_webhook_server()
 
 
 @tree.command(

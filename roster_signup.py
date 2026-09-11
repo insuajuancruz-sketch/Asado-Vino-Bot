@@ -75,15 +75,32 @@ ARG_OFFSET = timedelta(hours=-3)
 
 STATE_FILE = "/data/roster_state.json" if os.path.isdir("/data") else "roster_state.json"
 
-EMOJI_VOY = "✅"
+EMOJI_CANCELADO = "❌"
 EMOJI_TENTATIVO = "❓"
-EMOJI_NO_VOY = "❌"
-EMOJI_TANQUE = "🛡️"
 
-# Estos tres son excluyentes entre sí (una sola respuesta de asistencia por persona)
-EXCLUSIVE_EMOJIS = {EMOJI_VOY, EMOJI_TENTATIVO, EMOJI_NO_VOY}
-# El tanque es una marca aparte -- no excluye ni es excluida por las de arriba
-ALL_TRACKED_EMOJIS = EXCLUSIVE_EMOJIS | {EMOJI_TANQUE}
+# Unidades del clan: (nombre a mostrar, emoji/color). Cada persona elige UNA
+# sola opción de todo este conjunto (una unidad, o Cancelado, o Tentativo) --
+# son todas mutuamente excluyentes entre sí.
+UNIDADES = [
+    ("PRIMOS", "🟥"),
+    ("PICANTE", "🟩"),
+    ("FUEGO", "🟨"),
+    ("YUTA", "🟧"),
+    ("CMD", "🟦"),
+    ("WAMO", "🟪"),
+    ("BLINDADO", "⬛"),
+    ("LATERAL", "🟫"),
+    ("DEFENSA", "⬜"),
+    ("ARTY", "🔶"),
+    ("BREAK LINE", "🔷"),
+]
+
+EXCLUSIVE_EMOJIS = {emoji for _, emoji in UNIDADES} | {EMOJI_CANCELADO, EMOJI_TENTATIVO}
+ALL_TRACKED_EMOJIS = EXCLUSIVE_EMOJIS  # acá no hay categoría independiente, todo es un solo grupo excluyente
+
+_EMOJI_TO_LABEL = {emoji: nombre for nombre, emoji in UNIDADES}
+_EMOJI_TO_LABEL[EMOJI_CANCELADO] = "CANCELADO"
+_EMOJI_TO_LABEL[EMOJI_TENTATIVO] = "TENTATIVO"
 
 
 # =========================================================================
@@ -170,10 +187,18 @@ def build_embed(event: dict) -> discord.Embed:
             return "—"
         return "\n".join(e.split(":", 1)[1] for e in entries)
 
-    embed.add_field(name=f"{EMOJI_VOY} Confirmar ({len(event['signups'].get(EMOJI_VOY, []))})", value=names_list(EMOJI_VOY), inline=True)
-    embed.add_field(name=f"{EMOJI_TENTATIVO} Tentativo ({len(event['signups'].get(EMOJI_TENTATIVO, []))})", value=names_list(EMOJI_TENTATIVO), inline=True)
-    embed.add_field(name=f"{EMOJI_NO_VOY} Denegar ({len(event['signups'].get(EMOJI_NO_VOY, []))})", value=names_list(EMOJI_NO_VOY), inline=True)
-    embed.add_field(name=f"{EMOJI_TANQUE} Blindaje ({len(event['signups'].get(EMOJI_TANQUE, []))})", value=names_list(EMOJI_TANQUE), inline=False)
+    for nombre, emoji in UNIDADES:
+        count = len(event["signups"].get(emoji, []))
+        embed.add_field(name=f"{emoji} {nombre} ({count})", value=names_list(emoji), inline=True)
+
+    embed.add_field(
+        name=f"{EMOJI_TENTATIVO} Tentativo ({len(event['signups'].get(EMOJI_TENTATIVO, []))})",
+        value=names_list(EMOJI_TENTATIVO), inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI_CANCELADO} Cancelado ({len(event['signups'].get(EMOJI_CANCELADO, []))})",
+        value=names_list(EMOJI_CANCELADO), inline=True,
+    )
 
     if event.get("image_url"):
         embed.set_image(url=event["image_url"])
@@ -218,9 +243,14 @@ class EditEventModal(discord.ui.Modal):
         self.add_item(self.partido)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Responde/reserva la interacción DE INMEDIATO -- Discord exige una
+        # respuesta en 3 segundos, y las llamadas de abajo (editar mensaje,
+        # actualizar el Evento nativo) pueden tardar más que eso.
+        await interaction.response.defer(ephemeral=True)
+
         new_closes = parse_cierre(self.cierra.value)
         if not new_closes:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "No pude leer la fecha de cierre, no se guardó ningún cambio.", ephemeral=True
             )
             return
@@ -230,7 +260,7 @@ class EditEventModal(discord.ui.Modal):
         events = get_events()
         event = events.get(str(self.message_id))
         if not event:
-            await interaction.response.send_message("Ese evento ya no existe.", ephemeral=True)
+            await interaction.followup.send("Ese evento ya no existe.", ephemeral=True)
             return
 
         event["evento"] = self.nombre.value
@@ -254,7 +284,7 @@ class EditEventModal(discord.ui.Modal):
             except Exception as error:
                 print(f"No se pudo actualizar el Evento nativo de Discord: {error}")
 
-        await interaction.response.send_message("✅ Evento actualizado.", ephemeral=True)
+        await interaction.followup.send("✅ Evento actualizado.", ephemeral=True)
 
 
 class EditEventView(discord.ui.View):
@@ -293,7 +323,7 @@ class EditEventView(discord.ui.View):
 # bloquear el loop de asyncio del bot)
 # =========================================================================
 
-def _write_to_sheet_sync(evento: str, cierre_local_str: str, names: list[str]) -> tuple[bool, str]:
+def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict[str, list[str]]) -> tuple[bool, str]:
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not ROSTER_SHEET_ID:
         return False, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
 
@@ -316,17 +346,25 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names: list[str]) -
         start_row = len(existing) + 2  # deja una fila en blanco de separador
 
         rows = [[f"=== {evento} — cerró {cierre_local_str} (ARG) ==="]]
-        rows += [[n] for n in names] if names else [["(nadie se anotó)"]]
+        any_confirmed = False
+        for nombre_unidad, unit_names in names_by_unit.items():
+            if not unit_names:
+                continue
+            any_confirmed = True
+            rows.append([f"-- {nombre_unidad} --"])
+            rows += [[n] for n in unit_names]
+        if not any_confirmed:
+            rows.append(["(nadie confirmó para ninguna unidad)"])
         ws.update(f"A{start_row}", rows)
         return True, "ok"
     except Exception as error:
         return False, str(error)
 
 
-async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, names: list[str]) -> tuple[bool, str]:
+async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, names_by_unit: dict[str, list[str]]) -> tuple[bool, str]:
     cierre_local = closes_at_utc.astimezone(timezone(ARG_OFFSET)).strftime("%d/%m/%Y %H:%M")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, names)
+    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, names_by_unit)
 
 
 # =========================================================================
@@ -393,7 +431,7 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "closed": False,
             "image_url": imagen.url if imagen else None,
             "discord_event_id": None,
-            "signups": {EMOJI_VOY: [], EMOJI_TENTATIVO: [], EMOJI_NO_VOY: [], EMOJI_TANQUE: []},
+            "signups": {emoji: [] for emoji in ALL_TRACKED_EMOJIS},
         }
         embed = build_embed(event)
         message = await interaction.followup.send(embed=embed, wait=True)
@@ -555,22 +593,29 @@ async def roster_check_loop():
 
         await _refresh_message(channel, int(message_id), event)
 
-        confirmed_names = [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_VOY, [])]
-        ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, confirmed_names)
+        names_by_unit = {
+            nombre: [e.split(":", 1)[1] for e in event["signups"].get(emoji, [])]
+            for nombre, emoji in UNIDADES
+        }
+        total_confirmados = sum(len(v) for v in names_by_unit.values())
+        ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, names_by_unit)
 
         sheet_link = f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/edit" if ROSTER_SHEET_ID else ""
         mencion = f"<@&{OFICIALES_ROLE_ID}> " if OFICIALES_ROLE_ID else ""
+        resumen_unidades = "\n".join(
+            f"• {nombre}: {len(v)}" for nombre, v in names_by_unit.items() if v
+        ) or "(nadie confirmó para ninguna unidad)"
 
         if ok:
             texto = (
                 f"{mencion}📋 Cerró la anotación de **{event['evento']}** — "
-                f"{len(confirmed_names)} confirmados. Ya está la lista en la planilla, se puede armar el roster.\n{sheet_link}"
+                f"{total_confirmados} confirmados en total. Ya está la lista por unidad en la planilla, se puede armar el roster.\n"
+                f"{resumen_unidades}\n{sheet_link}"
             )
         else:
             texto = (
-                f"{mencion}📋 Cerró la anotación de **{event['evento']}** — {len(confirmed_names)} confirmados.\n"
-                f"⚠️ No se pudo escribir en la planilla automáticamente ({msg}). Confirmados:\n"
-                + "\n".join(confirmed_names or ["(nadie se anotó)"])
+                f"{mencion}📋 Cerró la anotación de **{event['evento']}** — {total_confirmados} confirmados en total.\n"
+                f"⚠️ No se pudo escribir en la planilla automáticamente ({msg}). Por unidad:\n{resumen_unidades}"
             )
         try:
             await channel.send(texto)

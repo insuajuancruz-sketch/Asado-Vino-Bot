@@ -397,7 +397,9 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         cierra="Cuándo cierra la anotación, formato DD/MM HH:MM en hora Argentina (ej: 15/09 20:00)",
         hora_partido="Cuándo arranca el partido, formato DD/MM HH:MM en hora Argentina (ej: 15/09 21:00)",
         imagen="Imagen/banner opcional para el evento (subila directo acá)",
-        mencionar="Rol opcional a mencionar/taggear al postear el evento (ej: @Jugadores)",
+        mencionar1="Rol opcional a mencionar/taggear al postear el evento (ej: @Jugadores)",
+        mencionar2="Otro rol opcional a mencionar",
+        mencionar3="Otro rol opcional a mencionar",
     )
     async def abrir_anotacion(
         interaction: discord.Interaction,
@@ -405,7 +407,9 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         cierra: str,
         hora_partido: str,
         imagen: discord.Attachment | None = None,
-        mencionar: discord.Role | None = None,
+        mencionar1: discord.Role | None = None,
+        mencionar2: discord.Role | None = None,
+        mencionar3: discord.Role | None = None,
     ):
         closes_at = parse_cierre(cierra)
         if not closes_at:
@@ -436,7 +440,8 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "signups": {emoji: [] for emoji in ALL_TRACKED_EMOJIS},
         }
         embed = build_embed(event)
-        contenido = f"{mencionar.mention} 📋 ¡Nueva anotación abierta!" if mencionar else None
+        roles_a_mencionar = [r for r in (mencionar1, mencionar2, mencionar3) if r]
+        contenido = f"{' '.join(r.mention for r in roles_a_mencionar)} 📋 ¡Nueva anotación abierta!" if roles_a_mencionar else None
         message = await interaction.followup.send(content=contenido, embed=embed, wait=True)
         for emoji in ALL_TRACKED_EMOJIS:
             await message.add_reaction(emoji)

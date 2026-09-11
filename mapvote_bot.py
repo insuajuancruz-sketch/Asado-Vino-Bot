@@ -428,6 +428,7 @@ async def on_ready():
     roster_loop.start()
     vip_shop.setup_vip_commands(tree, client, GUILD_ID, VIP_LOG_CHANNEL_ID)
     roster_signup.setup_roster_commands(tree, client, GUILD_ID)
+    await roster_signup.register_persistent_views(client)
     await tree.sync(guild=discord.Object(id=GUILD_ID))
     print("Comandos / sincronizados")
     await vip_shop.start_webhook_server()

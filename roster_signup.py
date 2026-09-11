@@ -354,8 +354,9 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         sh = client.open_by_key(ROSTER_SHEET_ID)
 
         def buscar_pestaña():
+            objetivo = ROSTER_SHEET_TAB.strip().lower()
             for hoja in sh.worksheets():  # lista fresca -- no depende del lookup por nombre, que resultó no ser confiable
-                if hoja.title == ROSTER_SHEET_TAB:
+                if hoja.title.strip().lower() == objetivo:
                     return hoja
             return None
 
@@ -374,7 +375,16 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
                     if ws is not None:
                         break
                 if ws is None:
-                    return False, f"No se pudo crear la pestaña '{ROSTER_SHEET_TAB}': {add_error}"
+                    # Diagnóstico: mostramos EXACTAMENTE qué títulos ve Google en
+                    # este momento, entre corchetes, para descartar un desfasaje
+                    # de mayúsculas/espacios/caracteres que a simple vista no se nota.
+                    titulos_reales = [repr(h.title) for h in sh.worksheets()]
+                    print(f"[roster_signup] Pestañas vistas por la API en este momento: {titulos_reales}")
+                    print(f"[roster_signup] Buscábamos exactamente: {ROSTER_SHEET_TAB!r}")
+                    return False, (
+                        f"No se pudo crear la pestaña '{ROSTER_SHEET_TAB}': {add_error} "
+                        f"(pestañas vistas: {titulos_reales})"
+                    )
 
         existing = ws.get_all_values()
         start_row = len(existing) + 2  # deja una fila en blanco de separador

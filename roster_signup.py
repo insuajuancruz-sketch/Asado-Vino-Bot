@@ -413,9 +413,19 @@ async def _get_display_name(guild: discord.Guild, user_id: int) -> str:
     return name
 
 
+_commands_registered = False
+
+
 def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discord.Client, guild_id: int):
-    global _client
+    global _client, _commands_registered
     _client = client
+
+    if _commands_registered:
+        # on_ready puede dispararse más de una vez en el mismo proceso (por
+        # ejemplo si el bot se reconecta al gateway internamente) -- sin este
+        # freno, se registrarían los comandos por duplicado.
+        return
+    _commands_registered = True
 
     @tree.command(name="abrir_anotacion", description="Abre la anotación para una partida/evento del 7DL", guild=discord.Object(id=guild_id))
     @discord.app_commands.describe(
@@ -440,7 +450,12 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         # Responde/reserva la interacción DE INMEDIATO -- Discord exige una
         # respuesta en 3 segundos, y no queremos que ninguna validación previa
         # (por rápida que sea) arriesgue pasarse de ese margen.
-        await interaction.response.defer()
+        if interaction.response.is_done():
+            return  # ya se respondió esta interacción (evita el error "already acknowledged")
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            return
 
         closes_at = parse_cierre(cierra)
         if not closes_at:
@@ -505,7 +520,12 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
 
     @tree.command(name="cerrar_anotacion", description="Cierra manualmente una anotación abierta en este canal", guild=discord.Object(id=guild_id))
     async def cerrar_anotacion(interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        if interaction.response.is_done():
+            return  # ya se respondió esta interacción (evita el error "already acknowledged")
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.HTTPException:
+            return
 
         events = get_events()
         match = next(

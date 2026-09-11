@@ -92,12 +92,13 @@ def save_purchases(purchases: dict):
         json.dump(purchases, f, ensure_ascii=False, indent=2)
 
 
-def create_pending_purchase(discord_user_id: int, player_id: str, meses: int, metodo: str) -> str:
+def create_pending_purchase(discord_user_id: int, player_id: str, player_name: str, meses: int, metodo: str) -> str:
     purchases = load_purchases()
     token = uuid.uuid4().hex
     purchases[token] = {
         "discord_user_id": discord_user_id,
         "player_id": player_id,
+        "player_name": player_name,
         "meses": meses,
         "days": meses * DAYS_PER_MONTH,
         "metodo": metodo,
@@ -144,10 +145,12 @@ async def finalize_purchase(token: str, client: discord.Client, vip_channel_id: 
     if not purchase or purchase["status"] != "pending":
         return  # ya procesado antes, o token desconocido -- evita duplicar VIP
 
+    nombre = purchase.get("player_name") or purchase["player_id"]
+
     ok, msg = await grant_vip(
         purchase["player_id"],
         purchase["days"],
-        description=f"VIP comprado — {purchase['days']} días — {purchase['metodo']}",
+        description=f"VIP {nombre} — {purchase['days']} días — {purchase['metodo']}",
     )
 
     purchase["status"] = "completed" if ok else "failed"
@@ -159,7 +162,7 @@ async def finalize_purchase(token: str, client: discord.Client, vip_channel_id: 
         user = await client.fetch_user(purchase["discord_user_id"])
         if ok:
             await user.send(
-                f"✅ ¡Gracias por tu compra! Tu VIP de **{purchase['days']} días** ya está activo "
+                f"✅ ¡Gracias por tu compra, {nombre}! Tu VIP de **{purchase['days']} días** ya está activo "
                 f"en el servidor (player_id `{purchase['player_id']}`)."
             )
         else:
@@ -176,7 +179,7 @@ async def finalize_purchase(token: str, client: discord.Client, vip_channel_id: 
             if channel:
                 estado = "✅ aplicado" if ok else f"⚠️ FALLÓ ({msg})"
                 await channel.send(
-                    f"💳 Compra de VIP procesada — <@{purchase['discord_user_id']}> · "
+                    f"💳 Compra de VIP procesada — <@{purchase['discord_user_id']}> · **{nombre}** · "
                     f"{purchase['days']} días · player_id `{purchase['player_id']}` · {estado}"
                 )
         except Exception:
@@ -321,7 +324,7 @@ async def paypal_verify_webhook(request_headers, body_bytes: bytes) -> bool:
 
 
 # =========================================================================
-# Comando de Discord — /comprar_vip
+# Comandos de Discord — /comprar_vip y /historial_compras
 # =========================================================================
 
 def setup_vip_commands(tree: discord.app_commands.CommandTree, client: discord.Client, guild_id: int, vip_channel_id: int | None = None):
@@ -334,7 +337,8 @@ def setup_vip_commands(tree: discord.app_commands.CommandTree, client: discord.C
     @discord.app_commands.describe(
         metodo="Con qué método querés pagar",
         meses=f"Cuántos meses de VIP (mínimo 1) — ${PRICE_ARS_PER_MONTH} ARS o ${PRICE_USD_PER_MONTH} USD por mes",
-        player_id="Tu Steam ID / player ID del juego",
+        player_id="Tu Steam ID / player ID — buscalo en https://hllrecords.com/",
+        nombre="Tu nombre de jugador (como querés que figure)",
     )
     @discord.app_commands.choices(metodo=metodo_choices)
     async def comprar_vip(
@@ -342,6 +346,7 @@ def setup_vip_commands(tree: discord.app_commands.CommandTree, client: discord.C
         metodo: discord.app_commands.Choice[str],
         meses: int,
         player_id: str,
+        nombre: str,
     ):
         if meses < 1:
             await interaction.response.send_message(
@@ -359,7 +364,7 @@ def setup_vip_commands(tree: discord.app_commands.CommandTree, client: discord.C
 
         await interaction.response.defer(ephemeral=True)
 
-        token = create_pending_purchase(interaction.user.id, player_id, meses, metodo.value)
+        token = create_pending_purchase(interaction.user.id, player_id, nombre, meses, metodo.value)
 
         if metodo.value == "mercadopago":
             if not MP_ACCESS_TOKEN:
@@ -387,6 +392,51 @@ def setup_vip_commands(tree: discord.app_commands.CommandTree, client: discord.C
             f"Apenas se confirme el pago te aviso por acá mismo.",
             ephemeral=True,
         )
+
+    @tree.command(name="historial_compras", description="Ver el historial de compras de VIP", guild=discord.Object(id=guild_id))
+    @discord.app_commands.describe(usuario="(Solo admins) ver el historial de otro usuario")
+    async def historial_compras(interaction: discord.Interaction, usuario: discord.Member | None = None):
+        es_admin = interaction.user.guild_permissions.manage_guild
+
+        if usuario and not es_admin:
+            await interaction.response.send_message(
+                "Solo un admin puede ver el historial de otra persona.", ephemeral=True
+            )
+            return
+
+        purchases = load_purchases()
+
+        if es_admin and usuario is None:
+            # Admin sin especificar usuario -> ve el historial completo del servidor
+            registros = list(purchases.values())
+        else:
+            filtro_id = usuario.id if usuario else interaction.user.id
+            registros = [p for p in purchases.values() if p["discord_user_id"] == filtro_id]
+
+        registros.sort(key=lambda p: p["created_at"], reverse=True)
+        registros = registros[:15]  # últimos 15, para no pasarse del límite del embed
+
+        if not registros:
+            await interaction.response.send_message("No hay compras registradas.", ephemeral=True)
+            return
+
+        estado_emoji = {"completed": "✅", "pending": "⏳", "failed": "❌"}
+        lineas = []
+        for p in registros:
+            ts = int(datetime.fromisoformat(p["created_at"]).timestamp())
+            nombre_p = p.get("player_name") or p["player_id"]
+            lineas.append(
+                f"{estado_emoji.get(p['status'], '❔')} **{nombre_p}** — {p['meses']} mes(es) — "
+                f"{p['metodo']} — `{p['player_id']}` — <t:{ts}:d>"
+            )
+
+        titulo = "📜 Historial de compras de VIP — todo el servidor" if (es_admin and usuario is None) else "📜 Historial de compras de VIP"
+        embed = discord.Embed(
+            title=titulo,
+            description="\n".join(lineas),
+            color=0x3498DB,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     globals()["_vip_channel_id"] = vip_channel_id
     globals()["_discord_client"] = client

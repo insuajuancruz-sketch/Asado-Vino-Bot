@@ -344,7 +344,6 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         import time as _time
 
         import gspread
-        from gspread.exceptions import WorksheetNotFound
         from google.oauth2.service_account import Credentials
 
         creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
@@ -354,29 +353,28 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
 
         sh = client.open_by_key(ROSTER_SHEET_ID)
 
-        # Primero intentamos obtener la pestaña directamente por nombre.
-        # Es más robusto que recorrer sh.worksheets(), ya que Google puede
-        # devolver temporalmente una lista desfasada respecto del estado real
-        # de la planilla.
-        try:
-            ws = sh.worksheet(ROSTER_SHEET_TAB)
-        except WorksheetNotFound:
-            ws = None
+        def buscar_pestaña():
+            for hoja in sh.worksheets():  # lista fresca -- no depende del lookup por nombre, que resultó no ser confiable
+                if hoja.title == ROSTER_SHEET_TAB:
+                    return hoja
+            return None
 
-        # Solo la creamos si realmente no existe. Si Google responde que ya
-        # existe (por una condición de carrera o un desfase interno), volvemos
-        # a obtenerla por nombre en lugar de considerar la escritura fallida.
+        ws = buscar_pestaña()
         if ws is None:
             try:
                 ws = sh.add_worksheet(title=ROSTER_SHEET_TAB, rows=500, cols=3)
             except Exception as add_error:
-                try:
-                    ws = sh.worksheet(ROSTER_SHEET_TAB)
-                except Exception:
-                    return False, (
-                        f"No se pudo obtener ni crear la pestaña "
-                        f"'{ROSTER_SHEET_TAB}': {add_error}"
-                    )
+                # Puede que ya exista del lado de Google pero la lista de recién
+                # todavía no lo reflejara (desfasaje momentáneo entre sistemas
+                # internos de Google) -- reintentamos la búsqueda un par de veces
+                # con una pequeña espera antes de rendirnos.
+                for intento in range(3):
+                    _time.sleep(1.5)
+                    ws = buscar_pestaña()
+                    if ws is not None:
+                        break
+                if ws is None:
+                    return False, f"No se pudo crear la pestaña '{ROSTER_SHEET_TAB}': {add_error}"
 
         existing = ws.get_all_values()
         start_row = len(existing) + 2  # deja una fila en blanco de separador

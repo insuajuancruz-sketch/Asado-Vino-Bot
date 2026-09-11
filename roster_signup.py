@@ -328,7 +328,7 @@ class EditEventView(discord.ui.View):
 # bloquear el loop de asyncio del bot)
 # =========================================================================
 
-def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict[str, list[str]], sheet_tab: str) -> tuple[bool, str]:
+def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict[str, list[str]], sheet_tab: str, formato: str | None) -> tuple[bool, str]:
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not ROSTER_SHEET_ID:
         return False, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
 
@@ -381,16 +381,14 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         existing = ws.get_all_values()
         start_row = len(existing) + 2  # deja una fila en blanco de separador
 
-        rows = [[f"=== {evento} — cerró {cierre_local_str} (ARG) ==="]]
+        rows = [[f"=== Evento: {evento} — Formato: {formato or 'sin especificar'} — cerró {cierre_local_str} (ARG) ==="]]
         any_confirmed = False
         for nombre_unidad, unit_names in names_by_unit.items():
-            if not unit_names:
-                continue
             any_confirmed = True
-            rows.append([f"-- {nombre_unidad} --"])
-            rows += [[n] for n in unit_names]
+            rows.append([f"-- {nombre_unidad} ({len(unit_names)}) --"])
+            rows += [[n] for n in unit_names] if unit_names else [["—"]]
         if not any_confirmed:
-            rows.append(["(nadie confirmó para ninguna unidad)"])
+            rows.append(["(sin categorías)"])
         ws.update(f"A{start_row}", rows)
         return True, "ok"
     except Exception as error:
@@ -401,7 +399,7 @@ async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, names_by
     cierre_local = closes_at_utc.astimezone(timezone(ARG_OFFSET)).strftime("%d/%m/%Y %H:%M")
     sheet_tab = f"Anotados - {formato}" if formato else ROSTER_SHEET_TAB_DEFAULT
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, names_by_unit, sheet_tab)
+    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, names_by_unit, sheet_tab, formato)
 
 
 # =========================================================================
@@ -621,13 +619,16 @@ async def _handle_reaction_add(payload: discord.RawReactionActionEvent):
     name = await _get_display_name(guild, payload.user_id)
     entry = f"{payload.user_id}:{name}"
 
+    # Ahora es un solo grupo excluyente por evento (incluye Tanque si el
+    # evento lo tiene) -- una sola opción activa por persona, sin excepciones.
+    grupo_excluyente = event_all_emojis(event)
+
     # Actualiza el estado en memoria PRIMERO, antes de tocar Discord -- así,
     # si sacar la reacción vieja dispara un evento recursivo (ver abajo), ese
     # evento va a encontrar el dato ya correcto en vez de pisarlo.
-    if emoji_key in EXCLUSIVE_EMOJIS:
-        for status in EXCLUSIVE_EMOJIS:
-            if entry in event["signups"].get(status, []):
-                event["signups"][status].remove(entry)
+    for status in grupo_excluyente:
+        if entry in event["signups"].get(status, []):
+            event["signups"][status].remove(entry)
 
     event["signups"].setdefault(emoji_key, [])
     if entry not in event["signups"][emoji_key]:
@@ -636,19 +637,17 @@ async def _handle_reaction_add(payload: discord.RawReactionActionEvent):
     persist_events()
     await _refresh_message(channel, payload.message_id, event)
 
-    # Mantiene una sola opción activa por persona -- saca las otras 12 en
-    # Discord, todas EN PARALELO (no una por una) para que la respuesta sea
-    # rápida en vez de ir sumando 12 viajes de ida y vuelta en secuencia.
-    if emoji_key in EXCLUSIVE_EMOJIS:
-        try:
-            message = await channel.fetch_message(payload.message_id)
-            member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
-            await asyncio.gather(
-                *(message.remove_reaction(other_emoji, member) for other_emoji in EXCLUSIVE_EMOJIS - {emoji_key}),
-                return_exceptions=True,  # si alguna falla (ej: no tenía esa reacción), no corta a las demás
-            )
-        except Exception:
-            pass
+    # Saca las otras reacciones del grupo, todas EN PARALELO (no una por una)
+    # para que la respuesta sea rápida en vez de ir sumando viajes en secuencia.
+    try:
+        message = await channel.fetch_message(payload.message_id)
+        member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
+        await asyncio.gather(
+            *(message.remove_reaction(other_emoji, member) for other_emoji in grupo_excluyente - {emoji_key}),
+            return_exceptions=True,  # si alguna falla (ej: no tenía esa reacción), no corta a las demás
+        )
+    except Exception:
+        pass
 
 
 async def _handle_reaction_remove(payload: discord.RawReactionActionEvent):
@@ -699,7 +698,11 @@ async def roster_check_loop():
         await _refresh_message(channel, int(message_id), event)
 
         confirmados = [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_CONFIRMAR, [])]
-        categorias = {"Confirmados": confirmados}
+        categorias = {
+            "Confirmados": confirmados,
+            "Tentativo": [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_TENTATIVO, [])],
+            "Cancelado": [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_CANCELADO, [])],
+        }
         if event.get("incluir_tanque"):
             categorias["Tanque"] = [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_TANQUE, [])]
 

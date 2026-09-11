@@ -34,6 +34,7 @@ Sin estos 4 pasos, el bot sigue funcionando para todo lo demás (votemap), pero
 fallar en silencio.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -66,6 +67,18 @@ PAYPAL_API_BASE = "https://api-m.paypal.com"  # sandbox: https://api-m.sandbox.p
 # esto es solo un fallback por si este archivo se corre suelto.
 CRCON_BASE_URL = os.environ.get("CRCON_BASE_URL", "http://152.53.39.31:8010")
 CRCON_API_TOKEN = os.environ.get("CRCON_API_TOKEN", "")
+
+# Respaldo de cada compra en Google Sheets (misma cuenta de servicio que ya
+# usa roster_signup.py -- si esta variable ya está cargada en Railway para el
+# roster, acá se reutiliza sola, no hace falta cargarla dos veces).
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+
+# ID del Google Sheet donde se guarda el respaldo de compras (puede ser el
+# mismo Sheet del organigrama, o uno aparte -- lo único que hace falta es
+# compartirlo con el "client_email" de la cuenta de servicio, con permiso de
+# Editor). La pestaña "Compras VIP" se crea sola la primera vez.
+VIP_SHEET_ID = os.environ.get("VIP_SHEET_ID", "")
+VIP_SHEET_TAB = "Compras VIP"
 
 # Precio por mes (30 días) de VIP. Se compra en múltiplos de 1 mes, sin techo
 # (1, 2, 3... meses), mínimo 1 mes.
@@ -138,6 +151,77 @@ async def grant_vip(player_id: str, days: int, description: str) -> tuple[bool, 
         return False, f"No se pudo conectar con el CRCON: {error}"
 
 
+def _write_purchase_to_sheet_sync(row: list) -> tuple[bool, str]:
+    if not GOOGLE_SERVICE_ACCOUNT_JSON or not VIP_SHEET_ID:
+        return False, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / VIP_SHEET_ID)."
+
+    try:
+        import time as _time
+
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        gc = gspread.authorize(creds)
+
+        sh = gc.open_by_key(VIP_SHEET_ID)
+
+        def buscar_pestaña():
+            objetivo = VIP_SHEET_TAB.strip().lower()
+            for hoja in sh.worksheets():  # lista fresca, igual que en roster_signup.py
+                if hoja.title.strip().lower() == objetivo:
+                    return hoja
+            return None
+
+        ws = buscar_pestaña()
+        if ws is None:
+            try:
+                ws = sh.add_worksheet(title=VIP_SHEET_TAB, rows=1000, cols=8)
+                ws.append_row(
+                    ["Fecha", "Usuario Discord (ID)", "Nombre jugador", "Player ID", "Meses", "Método", "Estado", "Token"]
+                )
+            except Exception as add_error:
+                # Mismo margen que en roster_signup.py por si la pestaña recién
+                # creada por otro proceso todavía no aparece en la lista.
+                for intento in range(3):
+                    _time.sleep(1.5)
+                    ws = buscar_pestaña()
+                    if ws is not None:
+                        break
+                if ws is None:
+                    titulos_reales = [repr(h.title) for h in sh.worksheets()]
+                    return False, (
+                        f"No se pudo crear la pestaña '{VIP_SHEET_TAB}': {add_error} "
+                        f"(pestañas vistas: {titulos_reales})"
+                    )
+
+        ws.append_row(row)
+        return True, "ok"
+    except Exception as error:
+        return False, str(error)
+
+
+async def log_purchase_to_sheet(purchase: dict, token: str, estado: str) -> tuple[bool, str]:
+    """Escribe una fila de respaldo en la pestaña 'Compras VIP' -- no afecta el
+    flujo si falla (el JSON local sigue siendo la fuente de verdad), solo deja
+    un segundo registro por si el volumen falla o alguien borra el JSON."""
+    fecha_local = datetime.fromisoformat(purchase["created_at"]).astimezone(timezone(timedelta(hours=-3)))
+    row = [
+        fecha_local.strftime("%d/%m/%Y %H:%M"),
+        str(purchase["discord_user_id"]),
+        purchase.get("player_name") or "",
+        purchase["player_id"],
+        purchase["meses"],
+        purchase["metodo"],
+        estado,
+        token,
+    ]
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _write_purchase_to_sheet_sync, row)
+
+
 async def finalize_purchase(token: str, client: discord.Client, vip_channel_id: int | None = None):
     """Se llama una vez confirmado el pago: aplica el VIP y avisa al usuario."""
     purchases = load_purchases()
@@ -157,6 +241,10 @@ async def finalize_purchase(token: str, client: discord.Client, vip_channel_id: 
     purchase["result"] = msg
     purchases[token] = purchase
     save_purchases(purchases)
+
+    ok_sheet, msg_sheet = await log_purchase_to_sheet(purchase, token, purchase["status"])
+    if not ok_sheet:
+        print(f"[vip_shop] No se pudo registrar la compra en el Sheet de respaldo: {msg_sheet}")
 
     try:
         user = await client.fetch_user(purchase["discord_user_id"])

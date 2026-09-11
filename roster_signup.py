@@ -59,6 +59,15 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 # ID del Google Sheet del organigrama (ver paso 8 del setup)
 ROSTER_SHEET_ID = os.environ.get("ROSTER_SHEET_ID", "")
 
+# Diagnóstico de arranque -- confirma en el log si el proceso realmente ve
+# estas 2 variables de entorno al importar el módulo (para descartar de raíz
+# un problema de inyección de variables de Railway vs. un bug en el código).
+print(
+    f"[roster_signup] GOOGLE_SERVICE_ACCOUNT_JSON detectada: "
+    f"{'sí' if GOOGLE_SERVICE_ACCOUNT_JSON else 'NO'} (largo={len(GOOGLE_SERVICE_ACCOUNT_JSON)}) | "
+    f"ROSTER_SHEET_ID detectada: {'sí — ' + ROSTER_SHEET_ID if ROSTER_SHEET_ID else 'NO'}"
+)
+
 # Nombre de la pestaña nueva donde el bot escribe las listas (se crea sola si no existe)
 ROSTER_SHEET_TAB = "Anotados"
 

@@ -69,7 +69,7 @@ print(
 )
 
 # Nombre de la pestaña nueva donde el bot escribe las listas (se crea sola si no existe)
-ROSTER_SHEET_TAB = "Anotados"
+ROSTER_SHEET_TAB_DEFAULT = "Anotados"  # se usa si no se elige un formato al abrir la anotación
 
 # Rol a mencionar en el aviso de cierre (opcional). Poner el ID del rol de
 # oficiales/mariscales, o None para no mencionar a nadie en particular.
@@ -84,36 +84,35 @@ ARG_OFFSET = timedelta(hours=-3)
 
 STATE_FILE = "/data/roster_state.json" if os.path.isdir("/data") else "roster_state.json"
 
-EMOJI_CANCELADO = "❌"
+EMOJI_CONFIRMAR = "✅"
 EMOJI_TENTATIVO = "❓"
+EMOJI_CANCELADO = "❌"
+EMOJI_TANQUE = "🛡️"  # optativo -- se agrega por evento, no siempre está
 
-# Unidades del clan: (nombre a mostrar, emoji/color). Cada persona elige UNA
-# sola opción de todo este conjunto (una unidad, o Cancelado, o Tentativo) --
-# son todas mutuamente excluyentes entre sí.
-UNIDADES = [
-    ("PRIMOS", "🟥"),
-    ("PICANTE", "🟩"),
-    ("FUEGO", "🟨"),
-    ("YUTA", "🟧"),
-    ("CMD", "🟦"),
-    ("WAMO", "🟪"),
-    ("BLINDADO", "⬛"),
-    ("LATERAL", "🟫"),
-    ("DEFENSA", "⬜"),
-    ("ARTY", "🔶"),
-    ("BREAK LINE", "🔷"),
-]
+# Las 3 opciones base son excluyentes entre sí (una sola por persona). El
+# tanque, cuando el evento lo incluye, es aparte -- se puede combinar con
+# cualquiera de las 3 (por ejemplo: Confirmar + Tanque).
+EXCLUSIVE_EMOJIS = {EMOJI_CONFIRMAR, EMOJI_TENTATIVO, EMOJI_CANCELADO}
 
-EXCLUSIVE_EMOJIS = {emoji for _, emoji in UNIDADES} | {EMOJI_CANCELADO, EMOJI_TENTATIVO}
-ALL_TRACKED_EMOJIS = EXCLUSIVE_EMOJIS  # acá no hay categoría independiente, todo es un solo grupo excluyente
+_LABELS = {
+    EMOJI_CONFIRMAR: "Confirmar",
+    EMOJI_TENTATIVO: "Tentativo",
+    EMOJI_CANCELADO: "Cancelado",
+    EMOJI_TANQUE: "Tanque",
+}
 
-# Lista (con orden fijo) para agregar las reacciones en el mismo orden en que
-# se muestran los campos del embed -- un `set` no garantiza ningún orden.
-ORDERED_EMOJIS = [emoji for _, emoji in UNIDADES] + [EMOJI_TENTATIVO, EMOJI_CANCELADO]
 
-_EMOJI_TO_LABEL = {emoji: nombre for nombre, emoji in UNIDADES}
-_EMOJI_TO_LABEL[EMOJI_CANCELADO] = "CANCELADO"
-_EMOJI_TO_LABEL[EMOJI_TENTATIVO] = "TENTATIVO"
+def event_all_emojis(event: dict) -> set[str]:
+    """Los emojis que aplican a ESTE evento en particular (el tanque es opcional por evento)."""
+    return EXCLUSIVE_EMOJIS | ({EMOJI_TANQUE} if event.get("incluir_tanque") else set())
+
+
+def event_ordered_emojis(event: dict) -> list[str]:
+    """Mismo conjunto que arriba, pero en el orden fijo en que se muestran/reaccionan."""
+    base = [EMOJI_CONFIRMAR, EMOJI_TENTATIVO, EMOJI_CANCELADO]
+    return base + ([EMOJI_TANQUE] if event.get("incluir_tanque") else [])
+
+
 
 
 # =========================================================================
@@ -193,6 +192,8 @@ def build_embed(event: dict) -> discord.Embed:
             value=f"<t:{int(match_at.timestamp())}:F> (<t:{int(match_at.timestamp())}:R>)",
             inline=False,
         )
+    if event.get("formato"):
+        embed.add_field(name="🗺️ Formato", value=event["formato"], inline=False)
 
     def names_list(status: str) -> str:
         entries = event["signups"].get(status, [])
@@ -200,18 +201,9 @@ def build_embed(event: dict) -> discord.Embed:
             return "—"
         return "\n".join(e.split(":", 1)[1] for e in entries)
 
-    for nombre, emoji in UNIDADES:
+    for emoji in event_ordered_emojis(event):
         count = len(event["signups"].get(emoji, []))
-        embed.add_field(name=f"{emoji} {nombre} ({count})", value=names_list(emoji), inline=True)
-
-    embed.add_field(
-        name=f"{EMOJI_TENTATIVO} Tentativo ({len(event['signups'].get(EMOJI_TENTATIVO, []))})",
-        value=names_list(EMOJI_TENTATIVO), inline=True,
-    )
-    embed.add_field(
-        name=f"{EMOJI_CANCELADO} Cancelado ({len(event['signups'].get(EMOJI_CANCELADO, []))})",
-        value=names_list(EMOJI_CANCELADO), inline=True,
-    )
+        embed.add_field(name=f"{emoji} {_LABELS[emoji]} ({count})", value=names_list(emoji), inline=True)
 
     if event.get("image_url"):
         embed.set_image(url=event["image_url"])
@@ -336,7 +328,7 @@ class EditEventView(discord.ui.View):
 # bloquear el loop de asyncio del bot)
 # =========================================================================
 
-def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict[str, list[str]]) -> tuple[bool, str]:
+def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict[str, list[str]], sheet_tab: str) -> tuple[bool, str]:
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not ROSTER_SHEET_ID:
         return False, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
 
@@ -354,7 +346,7 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         sh = client.open_by_key(ROSTER_SHEET_ID)
 
         def buscar_pestaña():
-            objetivo = ROSTER_SHEET_TAB.strip().lower()
+            objetivo = sheet_tab.strip().lower()
             for hoja in sh.worksheets():  # lista fresca -- no depende del lookup por nombre, que resultó no ser confiable
                 if hoja.title.strip().lower() == objetivo:
                     return hoja
@@ -363,7 +355,7 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         ws = buscar_pestaña()
         if ws is None:
             try:
-                ws = sh.add_worksheet(title=ROSTER_SHEET_TAB, rows=500, cols=3)
+                ws = sh.add_worksheet(title=sheet_tab, rows=500, cols=3)
             except Exception as add_error:
                 # Puede que ya exista del lado de Google pero la lista de recién
                 # todavía no lo reflejara (desfasaje momentáneo entre sistemas
@@ -380,9 +372,9 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
                     # de mayúsculas/espacios/caracteres que a simple vista no se nota.
                     titulos_reales = [repr(h.title) for h in sh.worksheets()]
                     print(f"[roster_signup] Pestañas vistas por la API en este momento: {titulos_reales}")
-                    print(f"[roster_signup] Buscábamos exactamente: {ROSTER_SHEET_TAB!r}")
+                    print(f"[roster_signup] Buscábamos exactamente: {sheet_tab!r}")
                     return False, (
-                        f"No se pudo crear la pestaña '{ROSTER_SHEET_TAB}': {add_error} "
+                        f"No se pudo crear la pestaña '{sheet_tab}': {add_error} "
                         f"(pestañas vistas: {titulos_reales})"
                     )
 
@@ -405,10 +397,11 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         return False, str(error)
 
 
-async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, names_by_unit: dict[str, list[str]]) -> tuple[bool, str]:
+async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, names_by_unit: dict[str, list[str]], formato: str | None) -> tuple[bool, str]:
     cierre_local = closes_at_utc.astimezone(timezone(ARG_OFFSET)).strftime("%d/%m/%Y %H:%M")
+    sheet_tab = f"Anotados - {formato}" if formato else ROSTER_SHEET_TAB_DEFAULT
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, names_by_unit)
+    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, names_by_unit, sheet_tab)
 
 
 # =========================================================================
@@ -445,21 +438,33 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         return
     _commands_registered = True
 
+    formato_choices = [
+        discord.app_commands.Choice(name="18", value="18"),
+        discord.app_commands.Choice(name="36", value="36"),
+        discord.app_commands.Choice(name="49", value="49"),
+        discord.app_commands.Choice(name="OTRO", value="OTRO"),
+    ]
+
     @tree.command(name="abrir_anotacion", description="Abre la anotación para una partida/evento del 7DL", guild=discord.Object(id=guild_id))
     @discord.app_commands.describe(
         evento="Nombre del evento (ej: 7dl vs 360)",
         cierra="Cuándo cierra la anotación, formato DD/MM HH:MM en hora Argentina (ej: 15/09 20:00)",
         hora_partido="Cuándo arranca el partido, formato DD/MM HH:MM en hora Argentina (ej: 15/09 21:00)",
+        formato="Formato a jugar -- separa el registro en la planilla por formato",
+        incluir_tanque="¿Agregar la opción de anotarse para Tanque? (se combina con Confirmar/Tentativo)",
         imagen="Imagen/banner opcional para el evento (subila directo acá)",
         mencionar1="Rol opcional a mencionar/taggear al postear el evento (ej: @Jugadores)",
         mencionar2="Otro rol opcional a mencionar",
         mencionar3="Otro rol opcional a mencionar",
     )
+    @discord.app_commands.choices(formato=formato_choices)
     async def abrir_anotacion(
         interaction: discord.Interaction,
         evento: str,
         cierra: str,
         hora_partido: str,
+        formato: discord.app_commands.Choice[str],
+        incluir_tanque: bool = False,
         imagen: discord.Attachment | None = None,
         mencionar1: discord.Role | None = None,
         mencionar2: discord.Role | None = None,
@@ -497,15 +502,18 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "closes_at": closes_at.isoformat(),
             "match_at": match_at.isoformat(),
             "closed": False,
+            "formato": formato.value,
+            "incluir_tanque": incluir_tanque,
             "image_url": imagen.url if imagen else None,
             "discord_event_id": None,
-            "signups": {emoji: [] for emoji in ALL_TRACKED_EMOJIS},
+            "signups": {},
         }
+        event["signups"] = {emoji: [] for emoji in event_all_emojis(event)}
         embed = build_embed(event)
         roles_a_mencionar = [r for r in (mencionar1, mencionar2, mencionar3) if r]
         contenido = f"{' '.join(r.mention for r in roles_a_mencionar)} 📋 ¡Nueva anotación abierta!" if roles_a_mencionar else None
         message = await interaction.followup.send(content=contenido, embed=embed, wait=True)
-        for emoji in ORDERED_EMOJIS:
+        for emoji in event_ordered_emojis(event):
             await message.add_reaction(emoji)
 
         events = get_events()
@@ -598,13 +606,15 @@ async def _handle_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.user_id == _client.user.id:
         return
     emoji_key = str(payload.emoji)
-    if emoji_key not in ALL_TRACKED_EMOJIS:
+    if emoji_key not in (EXCLUSIVE_EMOJIS | {EMOJI_TANQUE}):
         return
 
     events = get_events()
     event = events.get(str(payload.message_id))
     if not event or event["closed"]:
         return
+    if emoji_key not in event_all_emojis(event):
+        return  # ej: reaccionaron con Tanque en un evento que no lo incluye
 
     channel = _client.get_channel(payload.channel_id)
     guild = _client.get_guild(payload.guild_id)
@@ -626,18 +636,17 @@ async def _handle_reaction_add(payload: discord.RawReactionActionEvent):
     persist_events()
     await _refresh_message(channel, payload.message_id, event)
 
-    # Si es una reacción de asistencia (Confirmar/Denegar/Tentativo), mantiene
-    # una sola activa por persona -- saca las otras dos en Discord. El
-    # Blindaje queda aparte, se puede combinar con cualquier estado.
+    # Mantiene una sola opción activa por persona -- saca las otras 12 en
+    # Discord, todas EN PARALELO (no una por una) para que la respuesta sea
+    # rápida en vez de ir sumando 12 viajes de ida y vuelta en secuencia.
     if emoji_key in EXCLUSIVE_EMOJIS:
         try:
             message = await channel.fetch_message(payload.message_id)
             member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
-            for other_emoji in EXCLUSIVE_EMOJIS - {emoji_key}:
-                try:
-                    await message.remove_reaction(other_emoji, member)
-                except Exception:
-                    pass
+            await asyncio.gather(
+                *(message.remove_reaction(other_emoji, member) for other_emoji in EXCLUSIVE_EMOJIS - {emoji_key}),
+                return_exceptions=True,  # si alguna falla (ej: no tenía esa reacción), no corta a las demás
+            )
         except Exception:
             pass
 
@@ -646,12 +655,14 @@ async def _handle_reaction_remove(payload: discord.RawReactionActionEvent):
     if payload.user_id == _client.user.id:
         return
     emoji_key = str(payload.emoji)
-    if emoji_key not in ALL_TRACKED_EMOJIS:
+    if emoji_key not in (EXCLUSIVE_EMOJIS | {EMOJI_TANQUE}):
         return
 
     events = get_events()
     event = events.get(str(payload.message_id))
     if not event or event["closed"]:
+        return
+    if emoji_key not in event_all_emojis(event):
         return
 
     guild = _client.get_guild(payload.guild_id)
@@ -687,29 +698,32 @@ async def roster_check_loop():
 
         await _refresh_message(channel, int(message_id), event)
 
-        names_by_unit = {
-            nombre: [e.split(":", 1)[1] for e in event["signups"].get(emoji, [])]
-            for nombre, emoji in UNIDADES
-        }
-        total_confirmados = sum(len(v) for v in names_by_unit.values())
-        ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, names_by_unit)
+        confirmados = [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_CONFIRMAR, [])]
+        categorias = {"Confirmados": confirmados}
+        if event.get("incluir_tanque"):
+            categorias["Tanque"] = [e.split(":", 1)[1] for e in event["signups"].get(EMOJI_TANQUE, [])]
 
+        total_confirmados = len(confirmados)
+        formato = event.get("formato")
+        ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, categorias, formato)
+
+        pestaña_usada = f"Anotados - {formato}" if formato else ROSTER_SHEET_TAB_DEFAULT
         sheet_link = f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/edit" if ROSTER_SHEET_ID else ""
         mencion = f"<@&{OFICIALES_ROLE_ID}> " if OFICIALES_ROLE_ID else ""
         resumen_unidades = "\n".join(
-            f"• {nombre}: {len(v)}" for nombre, v in names_by_unit.items() if v
-        ) or "(nadie confirmó para ninguna unidad)"
+            f"• {nombre}: {len(v)}" for nombre, v in categorias.items() if v
+        ) or "(nadie confirmó)"
 
         if ok:
             texto = (
                 f"{mencion}📋 Cerró la anotación de **{event['evento']}** — "
-                f"{total_confirmados} confirmados en total. Ya está la lista por unidad en la planilla, se puede armar el roster.\n"
+                f"{total_confirmados} confirmados. Ya está la lista en la pestaña **{pestaña_usada}**, se puede armar el roster.\n"
                 f"{resumen_unidades}\n{sheet_link}"
             )
         else:
             texto = (
-                f"{mencion}📋 Cerró la anotación de **{event['evento']}** — {total_confirmados} confirmados en total.\n"
-                f"⚠️ No se pudo escribir en la planilla automáticamente ({msg}). Por unidad:\n{resumen_unidades}"
+                f"{mencion}📋 Cerró la anotación de **{event['evento']}** — {total_confirmados} confirmados.\n"
+                f"⚠️ No se pudo escribir en la planilla automáticamente ({msg}).\n{resumen_unidades}"
             )
         try:
             await channel.send(texto)

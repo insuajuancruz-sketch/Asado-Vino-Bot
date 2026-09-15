@@ -510,6 +510,28 @@ def _read_active_formato_sync() -> str | None:
         return None
 
 
+def _autocrop_whitespace(img, bg_rgb=(255, 255, 255), tolerance=12, padding=24):
+    """Recorta los márgenes en blanco que deja el tamaño de página fijo del
+    PDF exportado, quedándose solo con el área donde hay contenido real
+    (más un pequeño padding). Si por algún motivo no encuentra ningún
+    contenido, devuelve la imagen sin tocar en vez de romper."""
+    from PIL import Image, ImageChops
+
+    img_rgb = img.convert("RGB")
+    bg = Image.new("RGB", img_rgb.size, bg_rgb)
+    diff = ImageChops.difference(img_rgb, bg).convert("L")
+    bbox = diff.point(lambda p: 255 if p > tolerance else 0).getbbox()
+    if not bbox:
+        return img
+
+    left, top, right, bottom = bbox
+    left = max(0, left - padding)
+    top = max(0, top - padding)
+    right = min(img.width, right + padding)
+    bottom = min(img.height, bottom + padding)
+    return img.crop((left, top, right, bottom))
+
+
 async def export_sheet_range_as_image(sheet_tab: str, rango: str) -> tuple[bytes | None, str]:
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not ROSTER_SHEET_ID:
         return None, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
@@ -539,8 +561,9 @@ async def export_sheet_range_as_image(sheet_tab: str, rango: str) -> tuple[bytes
         images = convert_from_bytes(pdf_bytes, dpi=150)
         if not images:
             return None, "El PDF no generó ninguna imagen."
+        recortada = _autocrop_whitespace(images[0])
         buf = io.BytesIO()
-        images[0].save(buf, format="PNG")
+        recortada.save(buf, format="PNG")
         return buf.getvalue(), "ok"
     except Exception as error:
         return None, f"Error convirtiendo el PDF a imagen ({error}). ¿Está instalado poppler-utils?"

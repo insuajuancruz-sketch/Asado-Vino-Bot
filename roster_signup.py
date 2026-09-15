@@ -794,7 +794,17 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         await interaction.followup.send("Cerrando la anotación ahora mismo...", ephemeral=True)
 
     @tree.command(name="organigrama", description="Postea una captura del roster actual (ORGANIGRAMA GENERAL, A4:O30)", guild=discord.Object(id=guild_id))
-    async def organigrama(interaction: discord.Interaction):
+    @discord.app_commands.describe(
+        mencionar1="Rol opcional a mencionar/taggear al postear el roster (ej: @Jugadores)",
+        mencionar2="Otro rol opcional a mencionar",
+        mencionar3="Otro rol opcional a mencionar",
+    )
+    async def organigrama(
+        interaction: discord.Interaction,
+        mencionar1: discord.Role | None = None,
+        mencionar2: discord.Role | None = None,
+        mencionar3: discord.Role | None = None,
+    ):
         if interaction.response.is_done():
             return
         try:
@@ -807,10 +817,13 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             await interaction.followup.send(f"❌ No se pudo generar la captura: {msg}", ephemeral=True)
             return
 
+        roles_a_mencionar = [r for r in (mencionar1, mencionar2, mencionar3) if r]
+        contenido = " ".join(r.mention for r in roles_a_mencionar) if roles_a_mencionar else None
+
         file = discord.File(io.BytesIO(img_bytes), filename="roster.png")
         embed = discord.Embed(title="📋 Roster", color=0x2ECC71)
         embed.set_image(url="attachment://roster.png")
-        await interaction.followup.send(embed=embed, file=file)
+        await interaction.followup.send(content=contenido, embed=embed, file=file)
 
 
 async def _refresh_message(channel: discord.TextChannel, message_id: int, event: dict):

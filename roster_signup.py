@@ -713,12 +713,8 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         persist_events()
         await interaction.followup.send("Cerrando la anotación ahora mismo...", ephemeral=True)
 
-    @tree.command(name="organigrama", description="Postea una captura del roster actual de la planilla", guild=discord.Object(id=guild_id))
-    @discord.app_commands.describe(
-        pestaña="Pestaña a exportar (si no la ponés, usa el valor de B1 en ORGANIGRAMA GENERAL)",
-        rango="Rango de celdas a exportar, ej: A1:N25 (por defecto A1:N25)",
-    )
-    async def organigrama(interaction: discord.Interaction, pestaña: str | None = None, rango: str = "A1:N25"):
+    @tree.command(name="organigrama", description="Postea una captura del roster actual (ORGANIGRAMA GENERAL, A3:O41)", guild=discord.Object(id=guild_id))
+    async def organigrama(interaction: discord.Interaction):
         if interaction.response.is_done():
             return
         try:
@@ -726,25 +722,13 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         except discord.HTTPException:
             return
 
-        tab_name = pestaña
-        if not tab_name:
-            loop = asyncio.get_event_loop()
-            tab_name = await loop.run_in_executor(None, _read_active_formato_sync)
-        if not tab_name:
-            await interaction.followup.send(
-                "No pude determinar la pestaña -- especificá el parámetro `pestaña`, "
-                "o completá la celda B1 en ORGANIGRAMA GENERAL.",
-                ephemeral=True,
-            )
-            return
-
-        img_bytes, msg = await export_sheet_range_as_image(tab_name, rango)
+        img_bytes, msg = await export_sheet_range_as_image(ORGANIGRAMA_TAB, "A3:O41")
         if img_bytes is None:
             await interaction.followup.send(f"❌ No se pudo generar la captura: {msg}", ephemeral=True)
             return
 
         file = discord.File(io.BytesIO(img_bytes), filename="roster.png")
-        embed = discord.Embed(title=f"📋 Roster — {tab_name}", color=0x2ECC71)
+        embed = discord.Embed(title="📋 Roster", color=0x2ECC71)
         embed.set_image(url="attachment://roster.png")
         await interaction.followup.send(embed=embed, file=file)
 

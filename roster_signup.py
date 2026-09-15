@@ -195,6 +195,18 @@ def build_embed(event: dict) -> discord.Embed:
     if event.get("formato"):
         embed.add_field(name="🗺️ Formato", value=event["formato"], inline=False)
 
+    detalles = [
+        ("🏳️ Bando", event.get("bando")),
+        ("🗾 Mapa", event.get("mapa")),
+        ("📍 Punto Medio", event.get("punto_medio")),
+        ("📅 Fecha", event.get("fecha")),
+        ("⏱️ Horario Despliegue", event.get("horario_desplg")),
+        ("🏁 Horario Partida", event.get("horario_partida")),
+    ]
+    for nombre_campo, valor in detalles:
+        if valor:
+            embed.add_field(name=nombre_campo, value=valor, inline=True)
+
     def names_list(status: str) -> str:
         entries = event["signups"].get(status, [])
         if not entries:
@@ -459,6 +471,12 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         hora_partido="Cuándo arranca el partido, formato DD/MM HH:MM en hora Argentina (ej: 15/09 21:00)",
         formato="Formato a jugar -- separa el registro en la planilla por formato",
         incluir_tanque="¿Agregar la opción de anotarse para Tanque? (se combina con Confirmar/Tentativo)",
+        bando="Bando a jugar (ej: Aliados / Eje)",
+        mapa="Mapa de la partida (ej: Carentan)",
+        punto_medio="Punto medio / estrongpoint de referencia",
+        fecha="Fecha de la partida (texto libre, ej: 15/09)",
+        horario_desplg="Horario de despliegue/asistencia",
+        horario_partida="Horario en que arranca la partida (texto informativo, aparte de hora_partido)",
         imagen="Imagen/banner opcional para el evento (subila directo acá)",
         mencionar1="Rol opcional a mencionar/taggear al postear el evento (ej: @Jugadores)",
         mencionar2="Otro rol opcional a mencionar",
@@ -472,6 +490,12 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         hora_partido: str,
         formato: discord.app_commands.Choice[str],
         incluir_tanque: bool = False,
+        bando: str | None = None,
+        mapa: str | None = None,
+        punto_medio: str | None = None,
+        fecha: str | None = None,
+        horario_desplg: str | None = None,
+        horario_partida: str | None = None,
         imagen: discord.Attachment | None = None,
         mencionar1: discord.Role | None = None,
         mencionar2: discord.Role | None = None,
@@ -510,6 +534,12 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "match_at": match_at.isoformat(),
             "closed": False,
             "formato": formato.value,
+            "bando": bando,
+            "mapa": mapa,
+            "punto_medio": punto_medio,
+            "fecha": fecha,
+            "horario_desplg": horario_desplg,
+            "horario_partida": horario_partida,
             "incluir_tanque": incluir_tanque,
             "image_url": imagen.url if imagen else None,
             "discord_event_id": None,

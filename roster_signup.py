@@ -236,9 +236,11 @@ def _can_edit(interaction: discord.Interaction) -> bool:
     return False
 
 
-class EditEventModal(discord.ui.Modal):
+class EditGeneralesModal(discord.ui.Modal):
+    """Grupo 1: Evento, Cierra, Fecha y Hora Inicio."""
+
     def __init__(self, message_id: int, event: dict):
-        super().__init__(title="Editar evento")
+        super().__init__(title="Editar: Datos generales")
         self.message_id = message_id
 
         closes_local = datetime.fromisoformat(event["closes_at"]).astimezone(timezone(ARG_OFFSET))
@@ -248,16 +250,16 @@ class EditEventModal(discord.ui.Modal):
             else None
         )
 
-        self.nombre = discord.ui.TextInput(label="Nombre del evento", default=event["evento"], max_length=100)
-        self.cierra = discord.ui.TextInput(label="Cierra anotación (DD/MM HH:MM, ARG)", default=closes_local.strftime("%d/%m %H:%M"))
-        self.partido = discord.ui.TextInput(
-            label="Hora del partido (DD/MM HH:MM, ARG)",
+        self.nombre = discord.ui.TextInput(label="Evento", default=event["evento"], max_length=100)
+        self.cierra = discord.ui.TextInput(label="Cierra (DD/MM HH:MM, ARG)", default=closes_local.strftime("%d/%m %H:%M"))
+        self.hora_inicio = discord.ui.TextInput(
+            label="Fecha y Hora Inicio (DD/MM HH:MM, ARG)",
             default=match_local.strftime("%d/%m %H:%M") if match_local else "",
             required=False,
         )
         self.add_item(self.nombre)
         self.add_item(self.cierra)
-        self.add_item(self.partido)
+        self.add_item(self.hora_inicio)
 
     async def on_submit(self, interaction: discord.Interaction):
         # Responde/reserva la interacción DE INMEDIATO -- Discord exige una
@@ -272,7 +274,7 @@ class EditEventModal(discord.ui.Modal):
             )
             return
 
-        new_match = parse_cierre(self.partido.value) if self.partido.value.strip() else None
+        new_match = parse_cierre(self.hora_inicio.value) if self.hora_inicio.value.strip() else None
 
         events = get_events()
         event = events.get(str(self.message_id))
@@ -301,7 +303,88 @@ class EditEventModal(discord.ui.Modal):
             except Exception as error:
                 print(f"No se pudo actualizar el Evento nativo de Discord: {error}")
 
-        await interaction.followup.send("✅ Evento actualizado.", ephemeral=True)
+        await interaction.followup.send("✅ Datos generales actualizados.", ephemeral=True)
+
+
+class EditTacticosModal(discord.ui.Modal):
+    """Grupo 2: Bando, Mapa, Punto Medio, Despliegue."""
+
+    def __init__(self, message_id: int, event: dict):
+        super().__init__(title="Editar: Detalles tácticos")
+        self.message_id = message_id
+
+        self.bando = discord.ui.TextInput(label="Bando", default=event.get("bando") or "", required=False)
+        self.mapa = discord.ui.TextInput(label="Mapa", default=event.get("mapa") or "", required=False)
+        self.punto_medio = discord.ui.TextInput(label="Punto Medio", default=event.get("punto_medio") or "", required=False)
+        self.despliegue = discord.ui.TextInput(label="Despliegue", default=event.get("horario_desplg") or "", required=False)
+        self.add_item(self.bando)
+        self.add_item(self.mapa)
+        self.add_item(self.punto_medio)
+        self.add_item(self.despliegue)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        events = get_events()
+        event = events.get(str(self.message_id))
+        if not event:
+            await interaction.followup.send("Ese evento ya no existe.", ephemeral=True)
+            return
+
+        event["bando"] = self.bando.value or None
+        event["mapa"] = self.mapa.value or None
+        event["punto_medio"] = self.punto_medio.value or None
+        event["horario_desplg"] = self.despliegue.value or None
+        persist_events()
+
+        channel = interaction.client.get_channel(event["channel_id"])
+        await _refresh_message(channel, self.message_id, event)
+
+        await interaction.followup.send("✅ Detalles tácticos actualizados.", ephemeral=True)
+
+
+class EditCategorySelect(discord.ui.Select):
+    def __init__(self, message_id: int):
+        options = [
+            discord.SelectOption(
+                label="Datos generales",
+                description="Evento, Cierra, Fecha y Hora Inicio",
+                emoji="📋",
+                value="generales",
+            ),
+            discord.SelectOption(
+                label="Detalles tácticos",
+                description="Bando, Mapa, Punto Medio, Despliegue",
+                emoji="🗺️",
+                value="tacticos",
+            ),
+        ]
+        super().__init__(placeholder="¿Qué querés editar?", options=options)
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        events = get_events()
+        event = events.get(str(self.message_id))
+        if not event:
+            await interaction.response.send_message("No encontré este evento.", ephemeral=True)
+            return
+        if event["closed"]:
+            await interaction.response.send_message("Esta anotación ya cerró, no se puede editar.", ephemeral=True)
+            return
+
+        if self.values[0] == "generales":
+            await interaction.response.send_modal(EditGeneralesModal(self.message_id, event))
+        else:
+            await interaction.response.send_modal(EditTacticosModal(self.message_id, event))
+
+
+class EditCategoryView(discord.ui.View):
+    """Se manda como respuesta efímera al apretar 'Editar evento' -- no necesita
+    ser persistente entre reinicios porque dura solo mientras se elige qué editar."""
+
+    def __init__(self, message_id: int):
+        super().__init__(timeout=60)
+        self.add_item(EditCategorySelect(message_id))
 
 
 class EditEventView(discord.ui.View):
@@ -332,7 +415,9 @@ class EditEventView(discord.ui.View):
             await interaction.response.send_message("Esta anotación ya cerró, no se puede editar.", ephemeral=True)
             return
 
-        await interaction.response.send_modal(EditEventModal(self.message_id, event))
+        await interaction.response.send_message(
+            "¿Qué parte del evento querés editar?", view=EditCategoryView(self.message_id), ephemeral=True
+        )
 
 
 # =========================================================================
@@ -353,7 +438,7 @@ ORGANIGRAMA_MAX_FILAS = 106  # 112 - 7 + 1
 
 # Rango con la info general del evento (evento, cierre, hora, formato, bando,
 # mapa, punto medio, fecha, horario de despliegue) como pares etiqueta/valor.
-INFO_RANGE = "D31:E44"
+INFO_RANGE = "A6:B13"
 
 
 def _write_to_sheet_sync(event: dict, cierre_local_str: str, match_local_str: str, categorias: dict[str, list[str]]) -> tuple[bool, str]:
@@ -421,7 +506,7 @@ def _write_to_sheet_sync(event: dict, cierre_local_str: str, match_local_str: st
         if body_rows:
             ws.update("Q7", body_rows)
 
-        # Bloque de info general del evento, en D31:E44 (etiqueta en D, valor en E)
+        # Bloque de info general del evento, en A6:B13 (etiqueta en A, valor en B)
         info_rows = [
             ["Evento", evento],
             ["Cierra", cierre_local_str],
@@ -433,7 +518,7 @@ def _write_to_sheet_sync(event: dict, cierre_local_str: str, match_local_str: st
             ["Punto Medio", event.get("punto_medio") or "—"],
         ]
         ws.batch_clear([INFO_RANGE])
-        ws.update("D31", info_rows)
+        ws.update("A6", info_rows)
 
         return True, "ok"
     except Exception as error:
@@ -708,7 +793,7 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         persist_events()
         await interaction.followup.send("Cerrando la anotación ahora mismo...", ephemeral=True)
 
-    @tree.command(name="organigrama", description="Postea una captura del roster actual (ORGANIGRAMA GENERAL, A3:O41)", guild=discord.Object(id=guild_id))
+    @tree.command(name="organigrama", description="Postea una captura del roster actual (ORGANIGRAMA GENERAL, A4:O30)", guild=discord.Object(id=guild_id))
     async def organigrama(interaction: discord.Interaction):
         if interaction.response.is_done():
             return
@@ -717,7 +802,7 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         except discord.HTTPException:
             return
 
-        img_bytes, msg = await export_sheet_range_as_image(ORGANIGRAMA_TAB, "A3:O41")
+        img_bytes, msg = await export_sheet_range_as_image(ORGANIGRAMA_TAB, "A4:O30")
         if img_bytes is None:
             await interaction.followup.send(f"❌ No se pudo generar la captura: {msg}", ephemeral=True)
             return

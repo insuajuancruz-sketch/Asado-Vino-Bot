@@ -775,7 +775,6 @@ async def roster_check_loop():
         ok, msg = await write_accepted_to_sheet(event, closes_at, categorias)
 
         pestaña_usada = ORGANIGRAMA_TAB
-        sheet_link = f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/edit" if ROSTER_SHEET_ID else ""
         mencion = f"<@&{OFICIALES_ROLE_ID}> " if OFICIALES_ROLE_ID else ""
         resumen_unidades = "\n".join(
             f"• {nombre}: {len(v)}" for nombre, v in categorias.items() if v
@@ -784,8 +783,8 @@ async def roster_check_loop():
         if ok:
             texto = (
                 f"{mencion}📋 Cerró la anotación de **{event['evento']}** — "
-                f"{total_confirmados} confirmados. Ya está la lista en la pestaña **{pestaña_usada}**, se puede armar el roster.\n"
-                f"{resumen_unidades}\n{sheet_link}"
+                f"{total_confirmados} confirmados. Ya se puede armar el roster.\n"
+                f"{resumen_unidades}"
             )
         else:
             texto = (

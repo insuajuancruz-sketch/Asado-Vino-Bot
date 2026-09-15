@@ -190,7 +190,7 @@ def build_embed(event: dict) -> discord.Embed:
     if event.get("match_at"):
         match_at = datetime.fromisoformat(event["match_at"])
         embed.add_field(
-            name="🎮 Hora del partido",
+            name="📅 FECHA Y HORA INICIO",
             value=f"<t:{int(match_at.timestamp())}:F> (<t:{int(match_at.timestamp())}:R>)",
             inline=False,
         )
@@ -201,8 +201,7 @@ def build_embed(event: dict) -> discord.Embed:
         ("🏳️ Bando", event.get("bando")),
         ("🗾 Mapa", event.get("mapa")),
         ("📍 Punto Medio", event.get("punto_medio")),
-        ("📅 Fecha", event.get("fecha")),
-        ("⏱️ Horario Despliegue", event.get("horario_desplg")),
+        ("⏱️ DESPLIEGUE", event.get("horario_desplg")),
     ]
     for nombre_campo, valor in detalles:
         if valor:
@@ -426,13 +425,12 @@ def _write_to_sheet_sync(event: dict, cierre_local_str: str, match_local_str: st
         info_rows = [
             ["Evento", evento],
             ["Cierra", cierre_local_str],
-            ["Hora Partido", match_local_str],
+            ["FECHA Y HORA INICIO", match_local_str],
+            ["DESPLIEGUE", event.get("horario_desplg") or "—"],
             ["Formato", formato or "—"],
             ["Bando", event.get("bando") or "—"],
             ["Mapa", event.get("mapa") or "—"],
             ["Punto Medio", event.get("punto_medio") or "—"],
-            ["Fecha", event.get("fecha") or "—"],
-            ["Horario Desplg", event.get("horario_desplg") or "—"],
         ]
         ws.batch_clear([INFO_RANGE])
         ws.update("D31", info_rows)
@@ -581,14 +579,13 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
     @discord.app_commands.describe(
         evento="Nombre del evento (ej: 7dl vs 360)",
         cierra="Cuándo cierra la anotación, formato DD/MM HH:MM en hora Argentina (ej: 15/09 20:00)",
-        hora_partido="Cuándo arranca el partido, formato DD/MM HH:MM en hora Argentina (ej: 15/09 21:00)",
+        hora_partido="FECHA Y HORA INICIO del partido, formato DD/MM HH:MM en hora Argentina (ej: 15/09 21:00)",
         formato="Formato a jugar -- separa el registro en la planilla por formato",
         incluir_tanque="¿Agregar la opción de anotarse para Tanque? (se combina con Confirmar/Tentativo)",
         bando="Bando a jugar (ej: Aliados / Eje)",
         mapa="Mapa de la partida (ej: Carentan)",
         punto_medio="Punto medio / estrongpoint de referencia",
-        fecha="Fecha de la partida (texto libre, ej: 15/09)",
-        horario_desplg="Horario de despliegue/asistencia",
+        horario_desplg="DESPLIEGUE -- horario de despliegue/asistencia",
         imagen="Imagen/banner opcional para el evento (subila directo acá)",
         mencionar1="Rol opcional a mencionar/taggear al postear el evento (ej: @Jugadores)",
         mencionar2="Otro rol opcional a mencionar",
@@ -605,7 +602,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         bando: str | None = None,
         mapa: str | None = None,
         punto_medio: str | None = None,
-        fecha: str | None = None,
         horario_desplg: str | None = None,
         imagen: discord.Attachment | None = None,
         mencionar1: discord.Role | None = None,
@@ -648,7 +644,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "bando": bando,
             "mapa": mapa,
             "punto_medio": punto_medio,
-            "fecha": fecha,
             "horario_desplg": horario_desplg,
             "incluir_tanque": incluir_tanque,
             "image_url": imagen.url if imagen else None,

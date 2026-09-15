@@ -39,6 +39,7 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -326,7 +327,7 @@ GUILD_ID = 1287171299705229434
 # Huella única de este proceso (PID + hora de arranque) -- si /seed se
 # duplica de nuevo, comparar esta huella entre los dos mensajes va a decir
 # si salieron de dos procesos distintos corriendo al mismo tiempo, o de otra cosa.
-PROCESS_FINGERPRINT = f"pid{os.getpid()}-{datetime.now(timezone.utc).strftime('%H%M%S')}"
+PROCESS_FINGERPRINT = f"{uuid.uuid4().hex[:8]}-{datetime.now(timezone.utc).strftime('%H%M%S')}"
 
 intents = discord.Intents.default()
 intents.reactions = True

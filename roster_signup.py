@@ -328,13 +328,22 @@ class EditEventView(discord.ui.View):
 # bloquear el loop de asyncio del bot)
 # =========================================================================
 
-def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict[str, list[str]], sheet_tab: str, formato: str | None) -> tuple[bool, str]:
+# Pestaña y rango fijos donde vive el organigrama general -- Q6:S112.
+# Q = Confirmados (incluye a los que marcaron Tanque, con 🛡️ al lado del
+#     nombre -- siguen siendo gente disponible para jugar)
+# R = Tentativo
+# S = Cancelado
+# Fila 6 = encabezado (evento + formato). Filas 7-112 = nombres (106 lugares).
+ORGANIGRAMA_TAB = "ORGANIGRAMA GENERAL"
+ORGANIGRAMA_RANGE = "Q6:S112"
+ORGANIGRAMA_MAX_FILAS = 106  # 112 - 7 + 1
+
+
+def _write_to_sheet_sync(evento: str, cierre_local_str: str, categorias: dict[str, list[str]], sheet_tab: str, formato: str | None) -> tuple[bool, str]:
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not ROSTER_SHEET_ID:
         return False, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
 
     try:
-        import time as _time
-
         import gspread
         from google.oauth2.service_account import Credentials
 
@@ -346,7 +355,7 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
         sh = client.open_by_key(ROSTER_SHEET_ID)
 
         def buscar_pestaña():
-            objetivo = sheet_tab.strip().lower()
+            objetivo = ORGANIGRAMA_TAB.strip().lower()
             for hoja in sh.worksheets():  # lista fresca -- no depende del lookup por nombre, que resultó no ser confiable
                 if hoja.title.strip().lower() == objetivo:
                     return hoja
@@ -354,52 +363,52 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, names_by_unit: dict
 
         ws = buscar_pestaña()
         if ws is None:
-            try:
-                ws = sh.add_worksheet(title=sheet_tab, rows=500, cols=3)
-            except Exception as add_error:
-                # Puede que ya exista del lado de Google pero la lista de recién
-                # todavía no lo reflejara (desfasaje momentáneo entre sistemas
-                # internos de Google) -- reintentamos la búsqueda un par de veces
-                # con una pequeña espera antes de rendirnos.
-                for intento in range(3):
-                    _time.sleep(1.5)
-                    ws = buscar_pestaña()
-                    if ws is not None:
-                        break
-                if ws is None:
-                    # Diagnóstico: mostramos EXACTAMENTE qué títulos ve Google en
-                    # este momento, entre corchetes, para descartar un desfasaje
-                    # de mayúsculas/espacios/caracteres que a simple vista no se nota.
-                    titulos_reales = [repr(h.title) for h in sh.worksheets()]
-                    print(f"[roster_signup] Pestañas vistas por la API en este momento: {titulos_reales}")
-                    print(f"[roster_signup] Buscábamos exactamente: {sheet_tab!r}")
-                    return False, (
-                        f"No se pudo crear la pestaña '{sheet_tab}': {add_error} "
-                        f"(pestañas vistas: {titulos_reales})"
-                    )
+            return False, f"No se encontró la pestaña '{ORGANIGRAMA_TAB}' en la planilla."
 
-        existing = ws.get_all_values()
-        start_row = len(existing) + 2  # deja una fila en blanco de separador
+        # Q = Confirmados, sumando también a los de Tanque (marcados aparte)
+        confirmados = list(categorias.get("Confirmados", []))
+        if categorias.get("Tanque"):
+            confirmados += [f"{n} 🛡️" for n in categorias["Tanque"]]
+        tentativo = list(categorias.get("Tentativo", []))
+        cancelado = list(categorias.get("Cancelado", []))
 
-        rows = [[f"=== Evento: {evento} — Formato: {formato or 'sin especificar'} — cerró {cierre_local_str} (ARG) ==="]]
-        any_confirmed = False
-        for nombre_unidad, unit_names in names_by_unit.items():
-            any_confirmed = True
-            rows.append([f"-- {nombre_unidad} ({len(unit_names)}) --"])
-            rows += [[n] for n in unit_names] if unit_names else [["—"]]
-        if not any_confirmed:
-            rows.append(["(sin categorías)"])
-        ws.update(f"A{start_row}", rows)
+        # No deberían entrar más nombres que lugares hay en el rango (106)
+        confirmados = confirmados[:ORGANIGRAMA_MAX_FILAS]
+        tentativo = tentativo[:ORGANIGRAMA_MAX_FILAS]
+        cancelado = cancelado[:ORGANIGRAMA_MAX_FILAS]
+
+        etiqueta = f"{evento} ({formato})" if formato else evento
+        headers = [[
+            f"✅ Confirmados — {etiqueta}",
+            f"❓ Tentativo — {etiqueta}",
+            f"❌ Cancelado — {etiqueta}",
+        ]]
+
+        max_len = max(len(confirmados), len(tentativo), len(cancelado))
+        body_rows = [
+            [
+                confirmados[i] if i < len(confirmados) else "",
+                tentativo[i] if i < len(tentativo) else "",
+                cancelado[i] if i < len(cancelado) else "",
+            ]
+            for i in range(max_len)
+        ]
+
+        # Limpia todo el bloque antes de escribir -- cada cierre reemplaza por
+        # completo lo anterior, nunca se acumula ni queda basura de otro evento.
+        ws.batch_clear([ORGANIGRAMA_RANGE])
+        ws.update("Q6", headers)
+        if body_rows:
+            ws.update("Q7", body_rows)
         return True, "ok"
     except Exception as error:
         return False, str(error)
 
 
-async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, names_by_unit: dict[str, list[str]], formato: str | None) -> tuple[bool, str]:
+async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, categorias: dict[str, list[str]], formato: str | None) -> tuple[bool, str]:
     cierre_local = closes_at_utc.astimezone(timezone(ARG_OFFSET)).strftime("%d/%m/%Y %H:%M")
-    sheet_tab = f"Anotados - {formato}" if formato else ROSTER_SHEET_TAB_DEFAULT
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, names_by_unit, sheet_tab, formato)
+    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, categorias, ORGANIGRAMA_TAB, formato)
 
 
 # =========================================================================
@@ -710,7 +719,7 @@ async def roster_check_loop():
         formato = event.get("formato")
         ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, categorias, formato)
 
-        pestaña_usada = f"Anotados - {formato}" if formato else ROSTER_SHEET_TAB_DEFAULT
+        pestaña_usada = ORGANIGRAMA_TAB
         sheet_link = f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/edit" if ROSTER_SHEET_ID else ""
         mencion = f"<@&{OFICIALES_ROLE_ID}> " if OFICIALES_ROLE_ID else ""
         resumen_unidades = "\n".join(

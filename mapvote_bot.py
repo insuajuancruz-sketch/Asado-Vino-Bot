@@ -528,10 +528,9 @@ async def votemap_cerrar_en_error(interaction: discord.Interaction, error: disco
 VIP_CHANNEL_ID = 1504883762670997635
 
 # Enfriamiento de /seed: si se corre de nuevo dentro de esta ventana, la
-# segunda vez no publica nada. Cubre el caso sin importar la causa exacta del
-# duplicado (dos personas casi al mismo tiempo, un reinicio a destiempo, etc.)
+# segunda vez no publica nada. Se chequea contra el historial real del canal
+# (ver la función seed() más abajo), no contra una variable en memoria.
 SEED_COOLDOWN_SECONDS = 300  # 5 minutos
-_last_seed_at: datetime | None = None
 
 
 @tree.command(
@@ -540,18 +539,32 @@ _last_seed_at: datetime | None = None
     guild=discord.Object(id=GUILD_ID),
 )
 async def seed(interaction: discord.Interaction):
-    global _last_seed_at
-    now = datetime.now(timezone.utc)
-
-    # Chequea Y marca el cooldown ANTES de cualquier otra cosa (sin await en
-    # el medio), para que dos invocaciones casi simultáneas no pasen ambas.
-    if _last_seed_at and (now - _last_seed_at).total_seconds() < SEED_COOLDOWN_SECONDS:
-        restante = int(SEED_COOLDOWN_SECONDS - (now - _last_seed_at).total_seconds())
-        await interaction.response.send_message(
-            f"Ya se avisó hace poco -- esperá {restante}s antes de volver a usar /seed.", ephemeral=True
-        )
+    # Reserva la interacción de inmediato -- todavía no sabemos si vamos a
+    # publicar o a frenar, así que la respuesta pública/privada final se
+    # manda como followup después de chequear el historial.
+    try:
+        await interaction.response.defer()
+    except discord.HTTPException:
         return
-    _last_seed_at = now
+
+    # Chequea el HISTORIAL REAL DEL CANAL (compartido entre cualquier proceso
+    # que esté corriendo) en vez de una variable en memoria -- una variable en
+    # memoria no sirve durante una transición de deploy en Railway, donde el
+    # contenedor viejo y el nuevo conviven unos minutos, cada uno con su
+    # propia memoria separada, sin enterarse el uno del otro.
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=SEED_COOLDOWN_SECONDS)
+    async for msg in interaction.channel.history(limit=20):
+        if msg.author.id != client.user.id or "¡Arrancamos Seedeando" not in (msg.content or ""):
+            continue
+        if msg.created_at > cutoff:
+            restante = int(SEED_COOLDOWN_SECONDS - (datetime.now(timezone.utc) - msg.created_at).total_seconds())
+            await interaction.followup.send(
+                f"Ya se avisó hace poco -- esperá {max(restante, 1)}s antes de volver a usar /seed.",
+                ephemeral=True,
+            )
+            return
+        break  # el más reciente ya es viejo -- no hace falta seguir mirando para atrás
+
     print(f"[seed] Publicando desde el proceso {PROCESS_FINGERPRINT} (interacción {interaction.id})")
 
     contenido = (
@@ -560,15 +573,15 @@ async def seed(interaction: discord.Interaction):
         f"🗺️ Recordá que ya podés votar la rotación de mapas de la semana en <#{CHANNEL_ID}>\n"
         f"⭐ Y también podés comprar tu VIP en <#{VIP_CHANNEL_ID}>"
     )
-    try:
-        await interaction.response.send_message(contenido)
-    except discord.HTTPException:
-        return
+    await interaction.followup.send(contenido)
 
 
 @seed.error
 async def seed_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-    await interaction.response.send_message(f"Ocurrió un error: {error}", ephemeral=True)
+    if interaction.response.is_done():
+        await interaction.followup.send(f"Ocurrió un error: {error}", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"Ocurrió un error: {error}", ephemeral=True)
 
 
 @client.event

@@ -201,7 +201,6 @@ def build_embed(event: dict) -> discord.Embed:
         ("📍 Punto Medio", event.get("punto_medio")),
         ("📅 Fecha", event.get("fecha")),
         ("⏱️ Horario Despliegue", event.get("horario_desplg")),
-        ("🏁 Horario Partida", event.get("horario_partida")),
     ]
     for nombre_campo, valor in detalles:
         if valor:
@@ -351,7 +350,12 @@ ORGANIGRAMA_RANGE = "Q6:S112"
 ORGANIGRAMA_MAX_FILAS = 106  # 112 - 7 + 1
 
 
-def _write_to_sheet_sync(evento: str, cierre_local_str: str, categorias: dict[str, list[str]], sheet_tab: str, formato: str | None) -> tuple[bool, str]:
+# Rango con la info general del evento (evento, cierre, hora, formato, bando,
+# mapa, punto medio, fecha, horario de despliegue) como pares etiqueta/valor.
+INFO_RANGE = "D31:E44"
+
+
+def _write_to_sheet_sync(event: dict, cierre_local_str: str, match_local_str: str, categorias: dict[str, list[str]]) -> tuple[bool, str]:
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not ROSTER_SHEET_ID:
         return False, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
 
@@ -376,6 +380,9 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, categorias: dict[st
         ws = buscar_pestaña()
         if ws is None:
             return False, f"No se encontró la pestaña '{ORGANIGRAMA_TAB}' en la planilla."
+
+        formato = event.get("formato")
+        evento = event["evento"]
 
         # Q = Confirmados, sumando también a los de Tanque (marcados aparte)
         confirmados = list(categorias.get("Confirmados", []))
@@ -412,15 +419,36 @@ def _write_to_sheet_sync(evento: str, cierre_local_str: str, categorias: dict[st
         ws.update("Q6", headers)
         if body_rows:
             ws.update("Q7", body_rows)
+
+        # Bloque de info general del evento, en D31:E44 (etiqueta en D, valor en E)
+        info_rows = [
+            ["Evento", evento],
+            ["Cierra", cierre_local_str],
+            ["Hora Partido", match_local_str],
+            ["Formato", formato or "—"],
+            ["Bando", event.get("bando") or "—"],
+            ["Mapa", event.get("mapa") or "—"],
+            ["Punto Medio", event.get("punto_medio") or "—"],
+            ["Fecha", event.get("fecha") or "—"],
+            ["Horario Desplg", event.get("horario_desplg") or "—"],
+        ]
+        ws.batch_clear([INFO_RANGE])
+        ws.update("D31", info_rows)
+
         return True, "ok"
     except Exception as error:
         return False, str(error)
 
 
-async def write_accepted_to_sheet(evento: str, closes_at_utc: datetime, categorias: dict[str, list[str]], formato: str | None) -> tuple[bool, str]:
+async def write_accepted_to_sheet(event: dict, closes_at_utc: datetime, categorias: dict[str, list[str]]) -> tuple[bool, str]:
     cierre_local = closes_at_utc.astimezone(timezone(ARG_OFFSET)).strftime("%d/%m/%Y %H:%M")
+    match_local = (
+        datetime.fromisoformat(event["match_at"]).astimezone(timezone(ARG_OFFSET)).strftime("%d/%m/%Y %H:%M")
+        if event.get("match_at")
+        else "—"
+    )
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _write_to_sheet_sync, evento, cierre_local, categorias, ORGANIGRAMA_TAB, formato)
+    return await loop.run_in_executor(None, _write_to_sheet_sync, event, cierre_local, match_local, categorias)
 
 
 # =========================================================================
@@ -476,7 +504,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         punto_medio="Punto medio / estrongpoint de referencia",
         fecha="Fecha de la partida (texto libre, ej: 15/09)",
         horario_desplg="Horario de despliegue/asistencia",
-        horario_partida="Horario en que arranca la partida (texto informativo, aparte de hora_partido)",
         imagen="Imagen/banner opcional para el evento (subila directo acá)",
         mencionar1="Rol opcional a mencionar/taggear al postear el evento (ej: @Jugadores)",
         mencionar2="Otro rol opcional a mencionar",
@@ -495,7 +522,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         punto_medio: str | None = None,
         fecha: str | None = None,
         horario_desplg: str | None = None,
-        horario_partida: str | None = None,
         imagen: discord.Attachment | None = None,
         mencionar1: discord.Role | None = None,
         mencionar2: discord.Role | None = None,
@@ -539,7 +565,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "punto_medio": punto_medio,
             "fecha": fecha,
             "horario_desplg": horario_desplg,
-            "horario_partida": horario_partida,
             "incluir_tanque": incluir_tanque,
             "image_url": imagen.url if imagen else None,
             "discord_event_id": None,
@@ -747,7 +772,7 @@ async def roster_check_loop():
 
         total_confirmados = len(confirmados)
         formato = event.get("formato")
-        ok, msg = await write_accepted_to_sheet(event["evento"], closes_at, categorias, formato)
+        ok, msg = await write_accepted_to_sheet(event, closes_at, categorias)
 
         pestaña_usada = ORGANIGRAMA_TAB
         sheet_link = f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/edit" if ROSTER_SHEET_ID else ""

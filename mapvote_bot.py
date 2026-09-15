@@ -489,10 +489,11 @@ async def votemap_cerrar_en_error(interaction: discord.Interaction, error: disco
 # ID del canal público de VIP (distinto del canal de log de compras VIP_LOG_CHANNEL_ID)
 VIP_CHANNEL_ID = 1504883762670997635
 
-# Guarda los IDs de interacción de /seed ya procesados en este proceso -- evita
-# procesar la misma interacción dos veces si, por ejemplo, el contenedor se
-# reinició justo en el medio y hubo un instante con dos procesos conectados.
-_seed_recent_ids: set[int] = set()
+# Enfriamiento de /seed: si se corre de nuevo dentro de esta ventana, la
+# segunda vez no publica nada. Cubre el caso sin importar la causa exacta del
+# duplicado (dos personas casi al mismo tiempo, un reinicio a destiempo, etc.)
+SEED_COOLDOWN_SECONDS = 300  # 5 minutos
+_last_seed_at: datetime | None = None
 
 
 @tree.command(
@@ -501,11 +502,18 @@ _seed_recent_ids: set[int] = set()
     guild=discord.Object(id=GUILD_ID),
 )
 async def seed(interaction: discord.Interaction):
-    # Blindaje contra doble ejecución (ej: si el contenedor se reinició justo
-    # en el medio y por un instante hubo dos procesos conectados a la vez).
-    if interaction.id in _seed_recent_ids:
+    global _last_seed_at
+    now = datetime.now(timezone.utc)
+
+    # Chequea Y marca el cooldown ANTES de cualquier otra cosa (sin await en
+    # el medio), para que dos invocaciones casi simultáneas no pasen ambas.
+    if _last_seed_at and (now - _last_seed_at).total_seconds() < SEED_COOLDOWN_SECONDS:
+        restante = int(SEED_COOLDOWN_SECONDS - (now - _last_seed_at).total_seconds())
+        await interaction.response.send_message(
+            f"Ya se avisó hace poco -- esperá {restante}s antes de volver a usar /seed.", ephemeral=True
+        )
         return
-    _seed_recent_ids.add(interaction.id)
+    _last_seed_at = now
 
     contenido = (
         "@everyone 🌱 ¡Arrancamos Seedeando en Asado & Vino!\n\n"
@@ -513,8 +521,10 @@ async def seed(interaction: discord.Interaction):
         f"🗺️ Recordá que ya podés votar la rotación de mapas de la semana en <#{CHANNEL_ID}>\n"
         f"⭐ Y también podés comprar tu VIP en <#{VIP_CHANNEL_ID}>"
     )
-    await interaction.channel.send(contenido)
-    await interaction.response.send_message("Listo, aviso publicado.", ephemeral=True)
+    try:
+        await interaction.response.send_message(contenido)
+    except discord.HTTPException:
+        return
 
 
 @seed.error

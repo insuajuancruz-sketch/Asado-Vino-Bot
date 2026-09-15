@@ -323,6 +323,11 @@ def build_embed(state: dict) -> discord.Embed:
 # en vez de esperar hasta 1 hora que tarda la sincronización global de Discord).
 GUILD_ID = 1287171299705229434
 
+# Huella única de este proceso (PID + hora de arranque) -- si /seed se
+# duplica de nuevo, comparar esta huella entre los dos mensajes va a decir
+# si salieron de dos procesos distintos corriendo al mismo tiempo, o de otra cosa.
+PROCESS_FINGERPRINT = f"pid{os.getpid()}-{datetime.now(timezone.utc).strftime('%H%M%S')}"
+
 intents = discord.Intents.default()
 intents.reactions = True
 client = discord.Client(intents=intents)
@@ -444,7 +449,7 @@ async def rebuild_state_from_channel(channel: discord.TextChannel) -> dict | Non
 @client.event
 async def on_ready():
     global state
-    print(f"Conectado como {client.user}")
+    print(f"Conectado como {client.user} -- proceso {PROCESS_FINGERPRINT}")
 
     # Arranca el servidor de webhooks PRIMERO QUE NADA -- Railway chequea
     # periódicamente si el servicio responde en este puerto. Si el chequeo le
@@ -546,6 +551,7 @@ async def seed(interaction: discord.Interaction):
         )
         return
     _last_seed_at = now
+    print(f"[seed] Publicando desde el proceso {PROCESS_FINGERPRINT} (interacción {interaction.id})")
 
     contenido = (
         "@everyone 🌱 ¡Arrancamos Seedeando en Asado & Vino!\n\n"

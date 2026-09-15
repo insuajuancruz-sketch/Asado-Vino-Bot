@@ -35,8 +35,10 @@ Setup de la integración con CRCON:
        avisar en el canal y en el log en vez de fallar en silencio.
 """
 
+import asyncio
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -353,14 +355,44 @@ async def post_new_poll(channel: discord.TextChannel):
     save_state(state)
 
 
+# Agrupa varias reacciones seguidas en una sola edición real del mensaje, con
+# un mínimo de tiempo entre ediciones -- evita el límite normal de velocidad
+# de Discord y, sobre todo, el tope de por vida de ediciones a un mensaje de
+# más de 1 hora (error 30046), que se agotaba rápido editando en cada reacción.
+_refresh_lock = asyncio.Lock()
+_refresh_pending = False
+_refresh_min_interval = 2.0  # segundos mínimos entre ediciones reales
+_last_refresh_at = 0.0
+
+
 async def refresh_poll_message(channel: discord.TextChannel):
+    global _refresh_pending, _last_refresh_at
+
     if not state.get("message_id"):
         return
-    try:
-        message = await channel.fetch_message(state["message_id"])
-    except discord.NotFound:
+
+    if _refresh_lock.locked():
+        # Ya hay una edición en curso/programada -- marca que hace falta otra
+        # pasada más, y listo. No dispara un edit nuevo por cada reacción.
+        _refresh_pending = True
         return
-    await message.edit(embed=build_embed(state))
+
+    async with _refresh_lock:
+        while True:
+            _refresh_pending = False
+            elapsed = time.monotonic() - _last_refresh_at
+            if elapsed < _refresh_min_interval:
+                await asyncio.sleep(_refresh_min_interval - elapsed)
+            try:
+                message = await channel.fetch_message(state["message_id"])
+                await message.edit(embed=build_embed(state))
+            except discord.NotFound:
+                return
+            except discord.HTTPException as error:
+                print(f"No se pudo actualizar el mensaje de votemap: {error}")
+            _last_refresh_at = time.monotonic()
+            if not _refresh_pending:
+                break
 
 
 async def rebuild_state_from_channel(channel: discord.TextChannel) -> dict | None:

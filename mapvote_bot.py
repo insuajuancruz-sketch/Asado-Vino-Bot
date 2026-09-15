@@ -489,14 +489,24 @@ async def votemap_cerrar_en_error(interaction: discord.Interaction, error: disco
 # ID del canal público de VIP (distinto del canal de log de compras VIP_LOG_CHANNEL_ID)
 VIP_CHANNEL_ID = 1504883762670997635
 
+# Guarda los IDs de interacción de /seed ya procesados en este proceso -- evita
+# procesar la misma interacción dos veces si, por ejemplo, el contenedor se
+# reinició justo en el medio y hubo un instante con dos procesos conectados.
+_seed_recent_ids: set[int] = set()
+
 
 @tree.command(
     name="seed",
     description="Avisa a todo el servidor que arrancó el seedeo, con los links de votemap y VIP.",
     guild=discord.Object(id=GUILD_ID),
 )
-@discord.app_commands.checks.has_permissions(manage_guild=True)
 async def seed(interaction: discord.Interaction):
+    # Blindaje contra doble ejecución (ej: si el contenedor se reinició justo
+    # en el medio y por un instante hubo dos procesos conectados a la vez).
+    if interaction.id in _seed_recent_ids:
+        return
+    _seed_recent_ids.add(interaction.id)
+
     contenido = (
         "@everyone 🌱 ¡Arrancamos Seedeando en Asado & Vino!\n\n"
         "🔗 Entrá al detalle del server: https://hllrecords.com/asado\n\n"
@@ -509,12 +519,7 @@ async def seed(interaction: discord.Interaction):
 
 @seed.error
 async def seed_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-    if isinstance(error, discord.app_commands.MissingPermissions):
-        await interaction.response.send_message(
-            "Este comando es solo para administradores del servidor.", ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(f"Ocurrió un error: {error}", ephemeral=True)
+    await interaction.response.send_message(f"Ocurrió un error: {error}", ephemeral=True)
 
 
 @client.event

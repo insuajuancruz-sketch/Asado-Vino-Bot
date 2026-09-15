@@ -9,14 +9,17 @@ Reemplaza el uso de Apollo (que no tiene API/webhooks) por un sistema propio:
        las otras automáticamente si cambian de opinión).
     3. Al llegar la hora de cierre, el bot:
        - Edita el mensaje mostrando la lista final.
-       - Escribe la lista de "Accepted" (✅) en una pestaña nueva ("Anotados")
-         del Google Sheet del organigrama -- sin tocar las pestañas existentes
-         que arman los oficiales a mano.
+       - Escribe la lista de anotados en un rango fijo (Q6:S112) de la
+         pestaña "ORGANIGRAMA GENERAL" del Google Sheet del organigrama --
+         siempre pisando lo anterior, así ese bloque refleja SIEMPRE la
+         última anotación que cerró (de cualquier formato), lista para
+         compararse contra los dropdowns del organigrama.
        - Avisa en el mismo canal que la anotación cerró y que ya se puede
          armar el roster, con el link directo a la planilla.
 
 Requisitos nuevos:
-    pip install gspread google-auth
+    pip install gspread google-auth aiohttp pdf2image
+    (además necesita poppler-utils instalado en el sistema, para pdf2image)
 
 Setup de Google Sheets (desde cero, es gratis):
     1. Andá a https://console.cloud.google.com/ -> crear un proyecto nuevo
@@ -40,6 +43,8 @@ Setup de Google Sheets (desde cero, es gratis):
        https://docs.google.com/spreadsheets/d/1BgnPKbp6oPQjasASgqtn7-mKL-KjYazJ-3XK1bh7eC0/edit
        el ID es "1BgnPKbp6oPQjasASgqtn7-mKL-KjYazJ-3XK1bh7eC0" -- pegalo en
        ROSTER_SHEET_ID más abajo.
+    9. La pestaña "ORGANIGRAMA GENERAL" y el rango Q6:S112 ya tienen que
+       existir de antes en la planilla (el bot no crea esa pestaña sola).
 """
 
 import asyncio
@@ -190,7 +195,7 @@ def build_embed(event: dict) -> discord.Embed:
     if event.get("match_at"):
         match_at = datetime.fromisoformat(event["match_at"])
         embed.add_field(
-            name="📅 FECHA Y HORA INICIO",
+            name="🎮 Hora del partido",
             value=f"<t:{int(match_at.timestamp())}:F> (<t:{int(match_at.timestamp())}:R>)",
             inline=False,
         )
@@ -201,7 +206,8 @@ def build_embed(event: dict) -> discord.Embed:
         ("🏳️ Bando", event.get("bando")),
         ("🗾 Mapa", event.get("mapa")),
         ("📍 Punto Medio", event.get("punto_medio")),
-        ("⏱️ DESPLIEGUE", event.get("horario_desplg")),
+        ("📅 Fecha", event.get("fecha")),
+        ("⏱️ Horario Despliegue", event.get("horario_desplg")),
     ]
     for nombre_campo, valor in detalles:
         if valor:
@@ -236,11 +242,9 @@ def _can_edit(interaction: discord.Interaction) -> bool:
     return False
 
 
-class EditGeneralesModal(discord.ui.Modal):
-    """Grupo 1: Evento, Cierra, Fecha y Hora Inicio."""
-
+class EditEventModal(discord.ui.Modal):
     def __init__(self, message_id: int, event: dict):
-        super().__init__(title="Editar: Datos generales")
+        super().__init__(title="Editar evento")
         self.message_id = message_id
 
         closes_local = datetime.fromisoformat(event["closes_at"]).astimezone(timezone(ARG_OFFSET))
@@ -250,16 +254,16 @@ class EditGeneralesModal(discord.ui.Modal):
             else None
         )
 
-        self.nombre = discord.ui.TextInput(label="Evento", default=event["evento"], max_length=100)
-        self.cierra = discord.ui.TextInput(label="Cierra (DD/MM HH:MM, ARG)", default=closes_local.strftime("%d/%m %H:%M"))
-        self.hora_inicio = discord.ui.TextInput(
-            label="Fecha y Hora Inicio (DD/MM HH:MM, ARG)",
+        self.nombre = discord.ui.TextInput(label="Nombre del evento", default=event["evento"], max_length=100)
+        self.cierra = discord.ui.TextInput(label="Cierra anotación (DD/MM HH:MM, ARG)", default=closes_local.strftime("%d/%m %H:%M"))
+        self.partido = discord.ui.TextInput(
+            label="Hora del partido (DD/MM HH:MM, ARG)",
             default=match_local.strftime("%d/%m %H:%M") if match_local else "",
             required=False,
         )
         self.add_item(self.nombre)
         self.add_item(self.cierra)
-        self.add_item(self.hora_inicio)
+        self.add_item(self.partido)
 
     async def on_submit(self, interaction: discord.Interaction):
         # Responde/reserva la interacción DE INMEDIATO -- Discord exige una
@@ -274,7 +278,7 @@ class EditGeneralesModal(discord.ui.Modal):
             )
             return
 
-        new_match = parse_cierre(self.hora_inicio.value) if self.hora_inicio.value.strip() else None
+        new_match = parse_cierre(self.partido.value) if self.partido.value.strip() else None
 
         events = get_events()
         event = events.get(str(self.message_id))
@@ -303,88 +307,7 @@ class EditGeneralesModal(discord.ui.Modal):
             except Exception as error:
                 print(f"No se pudo actualizar el Evento nativo de Discord: {error}")
 
-        await interaction.followup.send("✅ Datos generales actualizados.", ephemeral=True)
-
-
-class EditTacticosModal(discord.ui.Modal):
-    """Grupo 2: Bando, Mapa, Punto Medio, Despliegue."""
-
-    def __init__(self, message_id: int, event: dict):
-        super().__init__(title="Editar: Detalles tácticos")
-        self.message_id = message_id
-
-        self.bando = discord.ui.TextInput(label="Bando", default=event.get("bando") or "", required=False)
-        self.mapa = discord.ui.TextInput(label="Mapa", default=event.get("mapa") or "", required=False)
-        self.punto_medio = discord.ui.TextInput(label="Punto Medio", default=event.get("punto_medio") or "", required=False)
-        self.despliegue = discord.ui.TextInput(label="Despliegue", default=event.get("horario_desplg") or "", required=False)
-        self.add_item(self.bando)
-        self.add_item(self.mapa)
-        self.add_item(self.punto_medio)
-        self.add_item(self.despliegue)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        events = get_events()
-        event = events.get(str(self.message_id))
-        if not event:
-            await interaction.followup.send("Ese evento ya no existe.", ephemeral=True)
-            return
-
-        event["bando"] = self.bando.value or None
-        event["mapa"] = self.mapa.value or None
-        event["punto_medio"] = self.punto_medio.value or None
-        event["horario_desplg"] = self.despliegue.value or None
-        persist_events()
-
-        channel = interaction.client.get_channel(event["channel_id"])
-        await _refresh_message(channel, self.message_id, event)
-
-        await interaction.followup.send("✅ Detalles tácticos actualizados.", ephemeral=True)
-
-
-class EditCategorySelect(discord.ui.Select):
-    def __init__(self, message_id: int):
-        options = [
-            discord.SelectOption(
-                label="Datos generales",
-                description="Evento, Cierra, Fecha y Hora Inicio",
-                emoji="📋",
-                value="generales",
-            ),
-            discord.SelectOption(
-                label="Detalles tácticos",
-                description="Bando, Mapa, Punto Medio, Despliegue",
-                emoji="🗺️",
-                value="tacticos",
-            ),
-        ]
-        super().__init__(placeholder="¿Qué querés editar?", options=options)
-        self.message_id = message_id
-
-    async def callback(self, interaction: discord.Interaction):
-        events = get_events()
-        event = events.get(str(self.message_id))
-        if not event:
-            await interaction.response.send_message("No encontré este evento.", ephemeral=True)
-            return
-        if event["closed"]:
-            await interaction.response.send_message("Esta anotación ya cerró, no se puede editar.", ephemeral=True)
-            return
-
-        if self.values[0] == "generales":
-            await interaction.response.send_modal(EditGeneralesModal(self.message_id, event))
-        else:
-            await interaction.response.send_modal(EditTacticosModal(self.message_id, event))
-
-
-class EditCategoryView(discord.ui.View):
-    """Se manda como respuesta efímera al apretar 'Editar evento' -- no necesita
-    ser persistente entre reinicios porque dura solo mientras se elige qué editar."""
-
-    def __init__(self, message_id: int):
-        super().__init__(timeout=60)
-        self.add_item(EditCategorySelect(message_id))
+        await interaction.followup.send("✅ Evento actualizado.", ephemeral=True)
 
 
 class EditEventView(discord.ui.View):
@@ -415,9 +338,7 @@ class EditEventView(discord.ui.View):
             await interaction.response.send_message("Esta anotación ya cerró, no se puede editar.", ephemeral=True)
             return
 
-        await interaction.response.send_message(
-            "¿Qué parte del evento querés editar?", view=EditCategoryView(self.message_id), ephemeral=True
-        )
+        await interaction.response.send_modal(EditEventModal(self.message_id, event))
 
 
 # =========================================================================
@@ -438,7 +359,12 @@ ORGANIGRAMA_MAX_FILAS = 106  # 112 - 7 + 1
 
 # Rango con la info general del evento (evento, cierre, hora, formato, bando,
 # mapa, punto medio, fecha, horario de despliegue) como pares etiqueta/valor.
-INFO_RANGE = "A6:B13"
+INFO_RANGE = "D31:E44"
+
+# Rango que se exporta como imagen en /organigrama -- solo el bloque de
+# unidades, sin el panel de EVENTO/CIERRA/... ni el logo (que viven más a la
+# izquierda/abajo en la misma pestaña).
+ORGANIGRAMA_EXPORT_RANGE = "A3:O30"
 
 
 def _write_to_sheet_sync(event: dict, cierre_local_str: str, match_local_str: str, categorias: dict[str, list[str]]) -> tuple[bool, str]:
@@ -506,19 +432,20 @@ def _write_to_sheet_sync(event: dict, cierre_local_str: str, match_local_str: st
         if body_rows:
             ws.update("Q7", body_rows)
 
-        # Bloque de info general del evento, en A6:B13 (etiqueta en A, valor en B)
+        # Bloque de info general del evento, en D31:E44 (etiqueta en D, valor en E)
         info_rows = [
             ["Evento", evento],
             ["Cierra", cierre_local_str],
-            ["FECHA Y HORA INICIO", match_local_str],
-            ["DESPLIEGUE", event.get("horario_desplg") or "—"],
+            ["Hora Partido", match_local_str],
             ["Formato", formato or "—"],
             ["Bando", event.get("bando") or "—"],
             ["Mapa", event.get("mapa") or "—"],
             ["Punto Medio", event.get("punto_medio") or "—"],
+            ["Fecha", event.get("fecha") or "—"],
+            ["Horario Desplg", event.get("horario_desplg") or "—"],
         ]
         ws.batch_clear([INFO_RANGE])
-        ws.update("A6", info_rows)
+        ws.update("D31", info_rows)
 
         return True, "ok"
     except Exception as error:
@@ -664,13 +591,14 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
     @discord.app_commands.describe(
         evento="Nombre del evento (ej: 7dl vs 360)",
         cierra="Cuándo cierra la anotación, formato DD/MM HH:MM en hora Argentina (ej: 15/09 20:00)",
-        hora_partido="FECHA Y HORA INICIO del partido, formato DD/MM HH:MM en hora Argentina (ej: 15/09 21:00)",
+        hora_partido="Cuándo arranca el partido, formato DD/MM HH:MM en hora Argentina (ej: 15/09 21:00)",
         formato="Formato a jugar -- separa el registro en la planilla por formato",
         incluir_tanque="¿Agregar la opción de anotarse para Tanque? (se combina con Confirmar/Tentativo)",
         bando="Bando a jugar (ej: Aliados / Eje)",
         mapa="Mapa de la partida (ej: Carentan)",
         punto_medio="Punto medio / estrongpoint de referencia",
-        horario_desplg="DESPLIEGUE -- horario de despliegue/asistencia",
+        fecha="Fecha de la partida (texto libre, ej: 15/09)",
+        horario_desplg="Horario de despliegue/asistencia",
         imagen="Imagen/banner opcional para el evento (subila directo acá)",
         mencionar1="Rol opcional a mencionar/taggear al postear el evento (ej: @Jugadores)",
         mencionar2="Otro rol opcional a mencionar",
@@ -687,6 +615,7 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         bando: str | None = None,
         mapa: str | None = None,
         punto_medio: str | None = None,
+        fecha: str | None = None,
         horario_desplg: str | None = None,
         imagen: discord.Attachment | None = None,
         mencionar1: discord.Role | None = None,
@@ -729,6 +658,7 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "bando": bando,
             "mapa": mapa,
             "punto_medio": punto_medio,
+            "fecha": fecha,
             "horario_desplg": horario_desplg,
             "incluir_tanque": incluir_tanque,
             "image_url": imagen.url if imagen else None,
@@ -793,18 +723,8 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         persist_events()
         await interaction.followup.send("Cerrando la anotación ahora mismo...", ephemeral=True)
 
-    @tree.command(name="organigrama", description="Postea una captura del roster actual (ORGANIGRAMA GENERAL, A4:O30)", guild=discord.Object(id=guild_id))
-    @discord.app_commands.describe(
-        mencionar1="Rol opcional a mencionar/taggear al postear el roster (ej: @Jugadores)",
-        mencionar2="Otro rol opcional a mencionar",
-        mencionar3="Otro rol opcional a mencionar",
-    )
-    async def organigrama(
-        interaction: discord.Interaction,
-        mencionar1: discord.Role | None = None,
-        mencionar2: discord.Role | None = None,
-        mencionar3: discord.Role | None = None,
-    ):
+    @tree.command(name="organigrama", description="Postea una captura del roster actual (ORGANIGRAMA GENERAL)", guild=discord.Object(id=guild_id))
+    async def organigrama(interaction: discord.Interaction):
         if interaction.response.is_done():
             return
         try:
@@ -812,18 +732,15 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         except discord.HTTPException:
             return
 
-        img_bytes, msg = await export_sheet_range_as_image(ORGANIGRAMA_TAB, "A4:O30")
+        img_bytes, msg = await export_sheet_range_as_image(ORGANIGRAMA_TAB, ORGANIGRAMA_EXPORT_RANGE)
         if img_bytes is None:
             await interaction.followup.send(f"❌ No se pudo generar la captura: {msg}", ephemeral=True)
             return
 
-        roles_a_mencionar = [r for r in (mencionar1, mencionar2, mencionar3) if r]
-        contenido = " ".join(r.mention for r in roles_a_mencionar) if roles_a_mencionar else None
-
         file = discord.File(io.BytesIO(img_bytes), filename="roster.png")
         embed = discord.Embed(title="📋 Roster", color=0x2ECC71)
         embed.set_image(url="attachment://roster.png")
-        await interaction.followup.send(content=contenido, embed=embed, file=file)
+        await interaction.followup.send(embed=embed, file=file)
 
 
 async def _refresh_message(channel: discord.TextChannel, message_id: int, event: dict):
@@ -971,7 +888,6 @@ async def roster_check_loop():
         formato = event.get("formato")
         ok, msg = await write_accepted_to_sheet(event, closes_at, categorias)
 
-        pestaña_usada = ORGANIGRAMA_TAB
         mencion = f"<@&{OFICIALES_ROLE_ID}> " if OFICIALES_ROLE_ID else ""
         resumen_unidades = "\n".join(
             f"• {nombre}: {len(v)}" for nombre, v in categorias.items() if v

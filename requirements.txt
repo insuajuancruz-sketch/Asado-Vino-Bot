@@ -2,3 +2,4 @@ discord.py>=2.3.2
 aiohttp>=3.9.0
 gspread>=6.0.0
 google-auth>=2.25.0
+pdf2image>=1.17.0

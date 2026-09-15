@@ -43,10 +43,12 @@ Setup de Google Sheets (desde cero, es gratis):
 """
 
 import asyncio
+import io
 import json
 import os
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 import discord
 
 # =========================================================================
@@ -452,6 +454,89 @@ async def write_accepted_to_sheet(event: dict, closes_at_utc: datetime, categori
 
 
 # =========================================================================
+# Exportar una pestaña/rango como imagen (para el comando /organigrama)
+# =========================================================================
+
+def _get_worksheet_gid_sync(sheet_tab: str) -> tuple[int | None, str | None, str]:
+    """Devuelve (gid_de_la_pestaña, access_token, mensaje_de_error_si_hubo)."""
+    try:
+        import gspread
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+        from google.oauth2.service_account import Credentials
+
+        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        creds.refresh(GoogleAuthRequest())  # necesario para tener un access_token fresco
+
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(ROSTER_SHEET_ID)
+        objetivo = sheet_tab.strip().lower()
+        for hoja in sh.worksheets():
+            if hoja.title.strip().lower() == objetivo:
+                return hoja.id, creds.token, "ok"
+        return None, None, f"No encontré la pestaña '{sheet_tab}'."
+    except Exception as error:
+        return None, None, str(error)
+
+
+def _read_active_formato_sync() -> str | None:
+    """Lee la celda B1 de ORGANIGRAMA GENERAL (el nombre de la pestaña activa esta semana)."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(ROSTER_SHEET_ID)
+        for hoja in sh.worksheets():
+            if hoja.title.strip().lower() == ORGANIGRAMA_TAB.lower():
+                valor = hoja.acell("B1").value
+                return valor.strip() if valor else None
+        return None
+    except Exception:
+        return None
+
+
+async def export_sheet_range_as_image(sheet_tab: str, rango: str) -> tuple[bytes | None, str]:
+    if not GOOGLE_SERVICE_ACCOUNT_JSON or not ROSTER_SHEET_ID:
+        return None, "Falta configurar Google Sheets (GOOGLE_SERVICE_ACCOUNT_JSON / ROSTER_SHEET_ID)."
+
+    loop = asyncio.get_event_loop()
+    gid, token, msg = await loop.run_in_executor(None, _get_worksheet_gid_sync, sheet_tab)
+    if gid is None:
+        return None, msg
+
+    export_url = (
+        f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/export"
+        f"?format=pdf&gid={gid}&range={rango}&size=A4&portrait=false"
+        f"&fitw=true&gridlines=false&printtitle=false"
+    )
+    try:
+        async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}) as session:
+            async with session.get(export_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    return None, f"Google respondió {resp.status} al exportar el PDF."
+                pdf_bytes = await resp.read()
+    except Exception as error:
+        return None, f"Error descargando el PDF: {error}"
+
+    try:
+        from pdf2image import convert_from_bytes
+
+        images = convert_from_bytes(pdf_bytes, dpi=150)
+        if not images:
+            return None, "El PDF no generó ninguna imagen."
+        buf = io.BytesIO()
+        images[0].save(buf, format="PNG")
+        return buf.getvalue(), "ok"
+    except Exception as error:
+        return None, f"Error convirtiendo el PDF a imagen ({error}). ¿Está instalado poppler-utils?"
+
+
+# =========================================================================
 # Cliente / comandos
 # =========================================================================
 
@@ -627,6 +712,41 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         events[match]["closes_at"] = datetime.now(timezone.utc).isoformat()
         persist_events()
         await interaction.followup.send("Cerrando la anotación ahora mismo...", ephemeral=True)
+
+    @tree.command(name="organigrama", description="Postea una captura del roster actual de la planilla", guild=discord.Object(id=guild_id))
+    @discord.app_commands.describe(
+        pestaña="Pestaña a exportar (si no la ponés, usa el valor de B1 en ORGANIGRAMA GENERAL)",
+        rango="Rango de celdas a exportar, ej: A1:N25 (por defecto A1:N25)",
+    )
+    async def organigrama(interaction: discord.Interaction, pestaña: str | None = None, rango: str = "A1:N25"):
+        if interaction.response.is_done():
+            return
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            return
+
+        tab_name = pestaña
+        if not tab_name:
+            loop = asyncio.get_event_loop()
+            tab_name = await loop.run_in_executor(None, _read_active_formato_sync)
+        if not tab_name:
+            await interaction.followup.send(
+                "No pude determinar la pestaña -- especificá el parámetro `pestaña`, "
+                "o completá la celda B1 en ORGANIGRAMA GENERAL.",
+                ephemeral=True,
+            )
+            return
+
+        img_bytes, msg = await export_sheet_range_as_image(tab_name, rango)
+        if img_bytes is None:
+            await interaction.followup.send(f"❌ No se pudo generar la captura: {msg}", ephemeral=True)
+            return
+
+        file = discord.File(io.BytesIO(img_bytes), filename="roster.png")
+        embed = discord.Embed(title=f"📋 Roster — {tab_name}", color=0x2ECC71)
+        embed.set_image(url="attachment://roster.png")
+        await interaction.followup.send(embed=embed, file=file)
 
 
 async def _refresh_message(channel: discord.TextChannel, message_id: int, event: dict):

@@ -365,7 +365,7 @@ class SignupView(discord.ui.View):
     _ESTILOS = {
         EMOJI_CONFIRMAR: discord.ButtonStyle.success,
         EMOJI_TENTATIVO: discord.ButtonStyle.secondary,
-        EMOJI_CANCELADO: discord.ButtonStyle.danger,
+        EMOJI_CANCELADO: discord.ButtonStyle.secondary,
         EMOJI_TANQUE: discord.ButtonStyle.primary,
     }
 

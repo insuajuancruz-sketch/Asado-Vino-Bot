@@ -4,9 +4,11 @@ Anotación para partidas competitivas — 7DL.
 Reemplaza el uso de Apollo (que no tiene API/webhooks) por un sistema propio:
     1. Un oficial abre la anotación con /abrir_anotacion, indicando el nombre
        del evento y cuándo cierra (fecha/hora Argentina).
-    2. El bot postea un mensaje con reacciones ✅ (voy) / ❓ (tentativo) / ❌ (no voy).
-       Cada persona solo puede tener una reacción activa a la vez (el bot saca
-       las otras automáticamente si cambian de opinión).
+    2. El bot postea un mensaje con botones ✅ Confirmar / ❓ Tentativo /
+       ❌ Cancelado (y 🛡️ Tanque si el evento lo incluye), con el conteo en
+       vivo en la etiqueta de cada botón. Cada persona solo puede tener una
+       opción activa a la vez (tocar otra pill la reemplaza; tocar la misma
+       que ya tenías marcada te saca de la lista).
     3. Al llegar la hora de cierre, el bot:
        - Edita el mensaje mostrando la lista final.
        - Escribe la lista de anotados en un rango fijo (Q6:S112) de la
@@ -51,6 +53,7 @@ import asyncio
 import io
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -178,6 +181,27 @@ def parse_cierre(cierre_str: str) -> datetime | None:
 # Embed del mensaje de anotación
 # =========================================================================
 
+def _chunk_names(nombres: list[str], max_por_bloque: int = 20, max_chars: int = 900) -> list[list[str]]:
+    """Parte una lista de nombres en varios bloques que entren en un field de
+    embed (Discord corta cada field en 1024 caracteres), sin cortar ningún
+    nombre a la mitad. Con esto la lista sale completa como la de Apollo, en
+    vez de quedar truncada."""
+    bloques: list[list[str]] = []
+    actual: list[str] = []
+    largo = 0
+    for nombre in nombres:
+        add_len = len(nombre) + 1
+        if actual and (len(actual) >= max_por_bloque or largo + add_len > max_chars):
+            bloques.append(actual)
+            actual = []
+            largo = 0
+        actual.append(nombre)
+        largo += add_len
+    if actual:
+        bloques.append(actual)
+    return bloques
+
+
 def build_embed(event: dict) -> discord.Embed:
     closes_at = datetime.fromisoformat(event["closes_at"])
     closed = event.get("closed", False)
@@ -213,15 +237,35 @@ def build_embed(event: dict) -> discord.Embed:
         if valor:
             embed.add_field(name=nombre_campo, value=valor, inline=True)
 
-    def names_list(status: str) -> str:
+    def names_list(status: str) -> list[str]:
         entries = event["signups"].get(status, [])
-        if not entries:
-            return "—"
-        return "\n".join(e.split(":", 1)[1] for e in entries)
+        return [e.split(":", 1)[1] for e in entries]
+
+    # Tope de seguridad: un embed no puede pasar de 25 fields ni 6000
+    # caracteres en total. Con hasta ~100 nombres por estado (5 bloques de 20)
+    # sobra margen para cualquier evento real; si algún día se pasa de ahí,
+    # el resto queda resumido en una sola línea en vez de romper el mensaje.
+    MAX_BLOQUES_POR_ESTADO = 5
 
     for emoji in event_ordered_emojis(event):
-        count = len(event["signups"].get(emoji, []))
-        embed.add_field(name=f"{emoji} {_LABELS[emoji]} ({count})", value=names_list(emoji), inline=True)
+        nombres = names_list(emoji)
+        count = len(nombres)
+        titulo_base = f"{emoji} {_LABELS[emoji]} ({count})"
+
+        if not nombres:
+            embed.add_field(name=titulo_base, value="—", inline=True)
+            continue
+
+        bloques = _chunk_names(nombres)
+        mostrados = bloques[:MAX_BLOQUES_POR_ESTADO]
+        for i, bloque in enumerate(mostrados):
+            titulo = titulo_base if len(mostrados) == 1 else f"{titulo_base} [{i + 1}/{len(mostrados)}]"
+            embed.add_field(name=titulo, value="\n".join(bloque), inline=True)
+
+        restantes = bloques[MAX_BLOQUES_POR_ESTADO:]
+        if restantes:
+            faltan = sum(len(b) for b in restantes)
+            embed.add_field(name=f"{emoji} (+{faltan} más)", value="Ver lista completa en /organigrama.", inline=True)
 
     if event.get("image_url"):
         embed.set_image(url=event["image_url"])
@@ -310,19 +354,52 @@ class EditEventModal(discord.ui.Modal):
         await interaction.followup.send("✅ Evento actualizado.", ephemeral=True)
 
 
-class EditEventView(discord.ui.View):
-    def __init__(self, message_id: int):
+class SignupView(discord.ui.View):
+    """Vista con los botones de anotación en formato 'pill' (con el conteo en
+    vivo en la etiqueta, como Apollo) + el botón de editar evento, todos
+    juntos en una sola fila. Reemplaza al sistema viejo de reacciones -- las
+    reacciones manuales de gente que reaccione igual por costumbre siguen
+    funcionando aparte (ver _handle_reaction_add más abajo), pero ya no es
+    el flujo principal."""
+
+    _ESTILOS = {
+        EMOJI_CONFIRMAR: discord.ButtonStyle.success,
+        EMOJI_TENTATIVO: discord.ButtonStyle.secondary,
+        EMOJI_CANCELADO: discord.ButtonStyle.danger,
+        EMOJI_TANQUE: discord.ButtonStyle.primary,
+    }
+
+    def __init__(self, message_id: int, event: dict):
         super().__init__(timeout=None)
         self.message_id = message_id
-        button = discord.ui.Button(
-            label="✏️ Editar evento",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"roster_edit:{message_id}",
-        )
-        button.callback = self._on_click
-        self.add_item(button)
 
-    async def _on_click(self, interaction: discord.Interaction):
+        if not event.get("closed"):
+            for emoji in event_ordered_emojis(event):
+                count = len(event["signups"].get(emoji, []))
+                boton = discord.ui.Button(
+                    label=f"{_LABELS[emoji]} ({count})",
+                    emoji=emoji,
+                    style=self._ESTILOS[emoji],
+                    custom_id=f"roster_vote:{message_id}:{emoji}",
+                )
+                boton.callback = self._make_vote_callback(emoji)
+                self.add_item(boton)
+
+            editar = discord.ui.Button(
+                label="Editar evento",
+                emoji="✏️",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"roster_edit:{message_id}",
+            )
+            editar.callback = self._on_edit_click
+            self.add_item(editar)
+
+    def _make_vote_callback(self, emoji: str):
+        async def callback(interaction: discord.Interaction):
+            await _handle_vote_click(interaction, self.message_id, emoji)
+        return callback
+
+    async def _on_edit_click(self, interaction: discord.Interaction):
         if not _can_edit(interaction):
             await interaction.response.send_message(
                 "Solo un admin/oficial puede editar este evento.", ephemeral=True
@@ -693,8 +770,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         roles_a_mencionar = [r for r in (mencionar1, mencionar2, mencionar3) if r]
         contenido = f"{' '.join(r.mention for r in roles_a_mencionar)} 📋 ¡Nueva anotación abierta!" if roles_a_mencionar else None
         message = await interaction.followup.send(content=contenido, embed=embed, wait=True)
-        for emoji in event_ordered_emojis(event):
-            await message.add_reaction(emoji)
 
         events = get_events()
         events[str(message.id)] = event
@@ -718,9 +793,9 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         except Exception as error:
             print(f"No se pudo crear el Evento nativo de Discord: {error}")
 
-        # Adjunta el botón de editar y lo registra como persistente (sigue
-        # funcionando aunque el bot se reinicie).
-        view = EditEventView(message.id)
+        # Adjunta los botones (voto + editar) y los registra como
+        # persistentes (siguen funcionando aunque el bot se reinicie).
+        view = SignupView(message.id, event)
         await message.edit(view=view)
         client.add_view(view, message_id=message.id)
 
@@ -766,24 +841,76 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         await interaction.followup.send(embed=embed, file=file)
 
 
+# Serializa el procesamiento de clics de los botones de voto -- mismo motivo
+# que antes con las reacciones: sin esto, dos clics casi simultáneos podían
+# pisarse la escritura del estado entre sí.
+_vote_lock = asyncio.Lock()
+
+
+async def _handle_vote_click(interaction: discord.Interaction, message_id: int, emoji_key: str):
+    async with _vote_lock:
+        events = get_events()
+        event = events.get(str(message_id))
+        if not event or event.get("closed"):
+            await interaction.response.send_message("Esta anotación ya cerró.", ephemeral=True)
+            return
+        if emoji_key not in event_all_emojis(event):
+            await interaction.response.send_message("Esa opción no aplica a este evento.", ephemeral=True)
+            return
+
+        user = interaction.user
+        entry = f"{user.id}:{user.display_name}"
+        grupo_excluyente = event_all_emojis(event)
+
+        estado_actual = next((s for s in grupo_excluyente if entry in event["signups"].get(s, [])), None)
+
+        for status in grupo_excluyente:
+            if entry in event["signups"].get(status, []):
+                event["signups"][status].remove(entry)
+
+        if estado_actual == emoji_key:
+            # Tocó la misma pill que ya tenía marcada -> la saca (toggle off)
+            mensaje = f"Se quitó tu anotación de **{_LABELS[emoji_key]}**."
+        else:
+            event["signups"].setdefault(emoji_key, [])
+            event["signups"][emoji_key].append(entry)
+            mensaje = f"Anotado como **{_LABELS[emoji_key]}** {emoji_key}."
+
+        persist_events()
+
+        try:
+            await interaction.response.edit_message(embed=build_embed(event), view=SignupView(message_id, event))
+        except discord.HTTPException:
+            pass
+
+        try:
+            await interaction.followup.send(mensaje, ephemeral=True)
+        except Exception:
+            pass
+
+
 async def _refresh_message(channel: discord.TextChannel, message_id: int, event: dict):
     try:
         message = await channel.fetch_message(message_id)
-        view = None if event["closed"] else EditEventView(message_id)
+        view = None if event["closed"] else SignupView(message_id, event)
         await message.edit(embed=build_embed(event), view=view)
     except Exception:
         pass
 
 
 async def register_persistent_views(client: discord.Client):
-    """Se llama una vez en on_ready -- vuelve a registrar los botones de
-    'Editar evento' de las anotaciones que sigan abiertas, para que sigan
-    funcionando después de un redeploy del bot."""
+    """Se llama una vez en on_ready -- vuelve a registrar los botones de las
+    anotaciones que sigan abiertas, para que sigan funcionando después de un
+    redeploy del bot."""
     for message_id, event in get_events().items():
         if not event.get("closed"):
-            client.add_view(EditEventView(int(message_id)), message_id=int(message_id))
+            client.add_view(SignupView(int(message_id), event), message_id=int(message_id))
 
 
+# LEGACY: el bot ya no agrega estas reacciones solo (ver SignupView, que
+# reemplaza esto con botones). Se deja el manejo por si alguien reacciona
+# igual por costumbre -- no rompe nada, solo ya no es el flujo principal.
+#
 # Serializa el procesamiento de reacciones -- sin esto, si alguien reacciona
 # a una opción y enseguida cambia a otra, dos manejos de reacción pueden
 # solaparse (cada uno sacando reacciones del otro en Discord) y terminar

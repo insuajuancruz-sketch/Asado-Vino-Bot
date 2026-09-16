@@ -434,9 +434,10 @@ ORGANIGRAMA_RANGE = "Q6:S112"
 ORGANIGRAMA_MAX_FILAS = 106  # 112 - 7 + 1
 
 
-# Rango con la info general del evento (evento, cierre, hora, formato, bando,
-# mapa, punto medio, fecha, horario de despliegue) como pares etiqueta/valor.
-INFO_RANGE = "D31:E44"
+# Rango con la info general del evento (evento, cierre, fecha y hora de
+# inicio, despliegue, formato, bando, mapa, punto medio) como pares
+# etiqueta/valor -- etiqueta en A, valor en B.
+INFO_RANGE = "A6:B13"
 
 # Rango que se exporta como imagen en /organigrama -- solo el bloque de
 # unidades, sin el panel de EVENTO/CIERRA/... ni el logo (que viven más a la
@@ -509,20 +510,19 @@ def _write_to_sheet_sync(event: dict, cierre_local_str: str, match_local_str: st
         if body_rows:
             ws.update("Q7", body_rows)
 
-        # Bloque de info general del evento, en D31:E44 (etiqueta en D, valor en E)
+        # Bloque de info general del evento, en A6:B13 (etiqueta en A, valor en B)
         info_rows = [
             ["Evento", evento],
             ["Cierra", cierre_local_str],
-            ["Hora Partido", match_local_str],
+            ["Fecha y Hora Inicio", match_local_str],
+            ["Despliegue", event.get("horario_desplg") or "—"],
             ["Formato", formato or "—"],
             ["Bando", event.get("bando") or "—"],
             ["Mapa", event.get("mapa") or "—"],
             ["Punto Medio", event.get("punto_medio") or "—"],
-            ["Fecha", event.get("fecha") or "—"],
-            ["Horario Desplg", event.get("horario_desplg") or "—"],
         ]
         ws.batch_clear([INFO_RANGE])
-        ws.update("D31", info_rows)
+        ws.update("A6", info_rows)
 
         return True, "ok"
     except Exception as error:

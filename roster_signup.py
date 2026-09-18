@@ -207,35 +207,34 @@ def build_embed(event: dict) -> discord.Embed:
     closed = event.get("closed", False)
 
     embed = discord.Embed(
-        title=f"📋 Anotación: {event['evento']}",
+        title=event["evento"],
         color=0x2ECC71 if not closed else 0x808080,
     )
-    embed.description = "Reaccioná según tu disponibilidad." if not closed else "La anotación está cerrada."
-    embed.add_field(
-        name="🔒 Cierra" if not closed else "🔒 Cerró",
-        value=f"<t:{int(closes_at.timestamp())}:F> (<t:{int(closes_at.timestamp())}:R>)",
-        inline=False,
-    )
+
+    # --- Bloque de tiempo: cierre + hora del partido juntos en un solo
+    # field, estilo "Time" de Apollo, en vez de dos fields separados con
+    # emoji propio cada uno.
+    tiempo_lineas = [
+        f"{'Cierra' if not closed else 'Cerró'}: <t:{int(closes_at.timestamp())}:f> (<t:{int(closes_at.timestamp())}:R>)"
+    ]
     if event.get("match_at"):
         match_at = datetime.fromisoformat(event["match_at"])
-        embed.add_field(
-            name="🎮 Hora del partido",
-            value=f"<t:{int(match_at.timestamp())}:F> (<t:{int(match_at.timestamp())}:R>)",
-            inline=False,
-        )
-    if event.get("formato"):
-        embed.add_field(name="🗺️ Formato", value=event["formato"], inline=False)
+        tiempo_lineas.append(f"Partido: <t:{int(match_at.timestamp())}:F>")
+    embed.add_field(name="🕐 Tiempo", value="\n".join(tiempo_lineas), inline=False)
 
+    # --- Bloque de detalles: todo lo demás (formato, bando, mapa, etc.)
+    # junto en un solo field de líneas cortas, en vez de una fila de
+    # fields sueltos -- se ve mucho más compacto y prolijo.
     detalles = [
-        ("🏳️ Bando", event.get("bando")),
-        ("🗾 Mapa", event.get("mapa")),
-        ("📍 Punto Medio", event.get("punto_medio")),
-        ("📅 Fecha", event.get("fecha")),
-        ("⏱️ Horario Despliegue", event.get("horario_desplg")),
+        ("Formato", event.get("formato")),
+        ("Bando", event.get("bando")),
+        ("Mapa", event.get("mapa")),
+        ("Punto Medio", event.get("punto_medio")),
+        ("Despliegue", event.get("horario_desplg")),
     ]
-    for nombre_campo, valor in detalles:
-        if valor:
-            embed.add_field(name=nombre_campo, value=valor, inline=True)
+    detalle_lineas = [f"**{nombre}:** {valor}" for nombre, valor in detalles if valor]
+    if detalle_lineas:
+        embed.add_field(name="🗺️ Detalles", value="\n".join(detalle_lineas), inline=False)
 
     def names_list(status: str) -> list[str]:
         entries = event["signups"].get(status, [])
@@ -250,6 +249,8 @@ def build_embed(event: dict) -> discord.Embed:
     for emoji in event_ordered_emojis(event):
         nombres = names_list(emoji)
         count = len(nombres)
+        # Título limpio, sin corchetes de paginación ni repetir el emoji en
+        # cada bloque -- estilo "Accepted (32)" de Apollo.
         titulo_base = f"{emoji} {_LABELS[emoji]} ({count})"
 
         if not nombres:
@@ -259,13 +260,14 @@ def build_embed(event: dict) -> discord.Embed:
         bloques = _chunk_names(nombres)
         mostrados = bloques[:MAX_BLOQUES_POR_ESTADO]
         for i, bloque in enumerate(mostrados):
-            titulo = titulo_base if len(mostrados) == 1 else f"{titulo_base} [{i + 1}/{len(mostrados)}]"
-            embed.add_field(name=titulo, value="\n".join(bloque), inline=True)
+            titulo = titulo_base if i == 0 else "​"
+            valor = "\n".join(f"{nombre}" for nombre in bloque)
+            embed.add_field(name=titulo, value=valor, inline=True)
 
         restantes = bloques[MAX_BLOQUES_POR_ESTADO:]
         if restantes:
             faltan = sum(len(b) for b in restantes)
-            embed.add_field(name=f"{emoji} (+{faltan} más)", value="Ver lista completa en /organigrama.", inline=True)
+            embed.add_field(name="​", value=f"*(+{faltan} más, ver /organigrama)*", inline=True)
 
     if event.get("image_url"):
         embed.set_image(url=event["image_url"])
@@ -848,14 +850,29 @@ _vote_lock = asyncio.Lock()
 
 
 async def _handle_vote_click(interaction: discord.Interaction, message_id: int, emoji_key: str):
+    # Reconoce la interacción DE INMEDIATO, antes de tocar el lock o el
+    # disco. Discord exige una respuesta en ~3 segundos; si dos clics caían
+    # casi juntos, el segundo esperaba el lock (y a veces también la
+    # escritura a disco de persist_events()) y se pasaba de esos 3
+    # segundos, lo que producía el error "no ha respondido a tiempo". Con
+    # el defer() como primera línea, Discord ya tiene su ACK y el resto del
+    # trabajo se resuelve después con edit_original_response/followup, sin
+    # ningún límite de tiempo estricto.
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=False)
+    except discord.HTTPException:
+        # Ya expiró o ya fue respondida por otro lado -- no hay nada más
+        # para hacer con esta interacción puntual.
+        return
+
     async with _vote_lock:
         events = get_events()
         event = events.get(str(message_id))
         if not event or event.get("closed"):
-            await interaction.response.send_message("Esta anotación ya cerró.", ephemeral=True)
+            await interaction.followup.send("Esta anotación ya cerró.", ephemeral=True)
             return
         if emoji_key not in event_all_emojis(event):
-            await interaction.response.send_message("Esa opción no aplica a este evento.", ephemeral=True)
+            await interaction.followup.send("Esa opción no aplica a este evento.", ephemeral=True)
             return
 
         user = interaction.user
@@ -879,7 +896,7 @@ async def _handle_vote_click(interaction: discord.Interaction, message_id: int, 
         persist_events()
 
         try:
-            await interaction.response.edit_message(embed=build_embed(event), view=SignupView(message_id, event))
+            await interaction.message.edit(embed=build_embed(event), view=SignupView(message_id, event))
         except discord.HTTPException:
             pass
 

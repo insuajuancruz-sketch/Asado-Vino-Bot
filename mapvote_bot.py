@@ -72,25 +72,29 @@ AUTHOR_ICON_URL = "PEGA_AQUI_LA_URL_DEL_LOGO"
 # Lista de mapas candidatos: (nombre a mostrar, emoji, ID real en el CRCON, categoría)
 # categoría: "warfare" u "offensive" -- se usa para garantizar la composición de la
 # rotación final (ver WARFARE_SLOTS / OFFENSIVE_SLOTS más abajo).
-# 16 candidatos: 12 Warfare + 4 Offensive. IDs confirmados con GET /api/get_maps
-# el 04/09/2026.
+# 16 candidatos: 12 Warfare + 4 Offensive. Cada uno tiene 2 IDs de CRCON:
+#   - Warfare: (día, noche)
+#   - Offensive: (allies, axis)
+# IDs confirmados con GET /api/get_maps el 15/09/2026. Casos especiales:
+#   - Hill 400 no tiene variante noche -- se repite el mismo ID en las 2 vueltas.
+#   - Mortain no tiene noche real -- se usa "dusk" (atardecer) como su 2da variante.
 MAPS = [
-    ("Carentan", "🏠", "carentan_warfare", "warfare"),
-    ("Omaha Beach", "🌊", "omahabeach_warfare", "warfare"),
-    ("Utah Beach", "🪖", "utahbeach_warfare", "warfare"),
-    ("St. Mere Eglise", "⛪", "stmereeglise_warfare", "warfare"),
-    ("St. Marie Du Mont", "🏘️", "stmariedumont_warfare", "warfare"),
-    ("Foy", "❄️", "foy_warfare", "warfare"),
-    ("Hurtgen Forest", "🌲", "hurtgenforest_warfare_V2", "warfare"),
-    ("Hill 400", "⛰️", "hill400_warfare", "warfare"),
-    ("Purple Heart Lane", "🌧️", "PHL_L_1944_Warfare", "warfare"),
-    ("Driel", "🌷", "driel_warfare", "warfare"),
-    ("Mortain", "🌾", "mortain_warfare_day", "warfare"),
-    ("Elsenborn Ridge", "🏔️", "elsenbornridge_warfare_day", "warfare"),
-    ("Remagen (Off. US)", "🌉", "REM_L_1945_OffensiveUS", "offensive"),
-    ("Kursk (Off. RUS)", "🐻", "kursk_offensive_rus", "offensive"),
-    ("Kharkov (Off. RUS)", "🥶", "kharkov_offensive_rus", "offensive"),
-    ("El Alamein (Off. CW)", "🏜️", "elalamein_offensive_CW", "offensive"),
+    ("Carentan", "🏠", "warfare", "carentan_warfare", "carentan_warfare_night"),
+    ("Omaha Beach", "🌊", "warfare", "omahabeach_warfare", "omahabeach_warfare_night"),
+    ("Utah Beach", "🪖", "warfare", "utahbeach_warfare", "utahbeach_warfare_night"),
+    ("St. Mere Eglise", "⛪", "warfare", "stmereeglise_warfare", "stmereeglise_warfare_night"),
+    ("St. Marie Du Mont", "🏘️", "warfare", "stmariedumont_warfare", "stmariedumont_warfare_night"),
+    ("Foy", "❄️", "warfare", "foy_warfare", "foy_warfare_night"),
+    ("Hurtgen Forest", "🌲", "warfare", "hurtgenforest_warfare_V2", "hurtgenforest_warfare_V2_night"),
+    ("Hill 400", "⛰️", "warfare", "hill400_warfare", "hill400_warfare"),  # sin variante noche
+    ("Purple Heart Lane", "🌧️", "warfare", "PHL_L_1944_Warfare", "PHL_L_1944_Warfare_Night"),
+    ("Driel", "🌷", "warfare", "driel_warfare", "driel_warfare_night"),
+    ("Mortain", "🌾", "warfare", "mortain_warfare_day", "mortain_warfare_dusk"),  # dusk como "noche"
+    ("Elsenborn Ridge", "🏔️", "warfare", "elsenbornridge_warfare_day", "elsenbornridge_warfare_night"),
+    ("Remagen (Off. US)", "🌉", "offensive", "REM_L_1945_OffensiveUS", "REM_L_1945_OffensiveGER"),
+    ("Kursk (Off. RUS)", "🐻", "offensive", "kursk_offensive_rus", "kursk_offensive_ger"),
+    ("Kharkov (Off. RUS)", "🥶", "offensive", "kharkov_offensive_rus", "kharkov_offensive_ger"),
+    ("El Alamein (Off. CW)", "🏜️", "offensive", "elalamein_offensive_CW", "elalamein_offensive_ger"),
 ]
 
 # Composición garantizada de la rotación semanal: no es simplemente "los 8 más
@@ -98,7 +102,7 @@ MAPS = [
 # OFFENSIVE_SLOTS Offensive más votados, cada categoría compite solo contra sí misma.
 WARFARE_SLOTS = 6
 OFFENSIVE_SLOTS = 2
-ROTATION_SIZE = WARFARE_SLOTS + OFFENSIVE_SLOTS  # 8, solo para referencia/mensajes
+ROTATION_SIZE = WARFARE_SLOTS + OFFENSIVE_SLOTS  # 8 por vuelta, 16 en total (2 vueltas con variantes)
 
 # Cada cuántos días se repite el ciclo de votación (cierra, aplica la rotación,
 # y abre la encuesta siguiente). Ej: 4 = la votación dura 4 días y vuelve a arrancar.
@@ -134,7 +138,7 @@ def new_poll_state() -> dict:
     return {
         "message_id": None,
         "voting_closes_at": closes_at.isoformat(),
-        "votes": {emoji: [] for _, emoji, _, _ in MAPS},  # emoji -> lista de "user_id:nombre"
+        "votes": {emoji: [] for _, emoji, _, _, _ in MAPS},  # emoji -> lista de "user_id:nombre"
         "closed": False,
         "rotation_result": None,  # lista de [nombre, votos], se llena al cerrar
     }
@@ -142,19 +146,20 @@ def new_poll_state() -> dict:
 
 def get_top_maps(state: dict) -> list[tuple[str, str, str, int]]:
     """
-    Devuelve la rotación final: los WARFARE_SLOTS mapas Warfare más votados +
-    los OFFENSIVE_SLOTS mapas Offensive más votados (cada categoría compite
-    solo contra sí misma, así la composición queda garantizada). Formato de
-    cada item: (nombre, emoji, crcon_id, cantidad_votos).
+    Devuelve la rotación final para MOSTRAR (ranking): los WARFARE_SLOTS mapas
+    Warfare más votados + los OFFENSIVE_SLOTS mapas Offensive más votados.
+    Formato de cada item: (nombre, emoji, crcon_id_variante_principal, cantidad_votos).
+    El crcon_id acá es solo de referencia para texto -- la aplicación real al
+    CRCON usa build_rotation_order(), que maneja las 2 variantes de cada uno.
     """
     warfare = [
-        (name, emoji, crcon_id, len(state["votes"].get(emoji, [])))
-        for name, emoji, crcon_id, category in MAPS
+        (name, emoji, id_a, len(state["votes"].get(emoji, [])))
+        for name, emoji, category, id_a, id_b in MAPS
         if category == "warfare"
     ]
     offensive = [
-        (name, emoji, crcon_id, len(state["votes"].get(emoji, [])))
-        for name, emoji, crcon_id, category in MAPS
+        (name, emoji, id_a, len(state["votes"].get(emoji, [])))
+        for name, emoji, category, id_a, id_b in MAPS
         if category == "offensive"
     ]
     warfare.sort(key=lambda x: x[3], reverse=True)
@@ -167,45 +172,73 @@ def get_top_maps(state: dict) -> list[tuple[str, str, str, int]]:
 
 def build_rotation_order(state: dict) -> list[str]:
     """
-    Arma el orden EXACTO en que se cargan los mapas en el CRCON: bloques de
-    Warfare intercalados con Offensive (ej. con 6 Warfare / 2 Offensive da
-    W-W-W-O-W-W-W-O), en vez del orden de votos. Sirve para que el Offensive
-    quede como "corte" entre tandas de Warfare en vez de ir todo junto.
-    Devuelve solo los crcon_id, en el orden final a aplicar.
+    Arma las 2 RONDAS de la rotación (16 mapas en total, 8 por ronda):
+        Ronda 1: W-W-W-O-W-W-W-O con la variante "principal" de cada uno
+                 (día para Warfare, allies para Offensive) -- PERO alternada
+                 por posición de ranking, para que ninguna ronda quede toda
+                 de un mismo tipo (ver abajo).
+        Ronda 2: mismo orden exacto, con la variante OPUESTA de cada uno
+                 (noche/axis para los que en la Ronda 1 tenían día/allies,
+                 y viceversa para los que ya tenían la opuesta).
+
+    La alternancia es por posición de voto: dentro de cada categoría, el
+    1er, 3er, 5to... más votado arranca con la variante principal (día /
+    allies) en la Ronda 1, y el 2do, 4to, 6to... arranca con la variante
+    opuesta (noche / axis) en la Ronda 1 -- así cada ronda queda mezclada
+    (nunca "toda de noche" ni "toda de día" de una sola vez).
+
+    Devuelve solo los crcon_id, Ronda 1 seguida de Ronda 2 (16 en total, o
+    menos si hubo menos mapas votados).
     """
     warfare = [
-        (name, emoji, crcon_id, len(state["votes"].get(emoji, [])))
-        for name, emoji, crcon_id, category in MAPS
+        (name, emoji, id_a, id_b, len(state["votes"].get(emoji, [])))
+        for name, emoji, category, id_a, id_b in MAPS
         if category == "warfare"
     ]
     offensive = [
-        (name, emoji, crcon_id, len(state["votes"].get(emoji, [])))
-        for name, emoji, crcon_id, category in MAPS
+        (name, emoji, id_a, id_b, len(state["votes"].get(emoji, [])))
+        for name, emoji, category, id_a, id_b in MAPS
         if category == "offensive"
     ]
-    warfare.sort(key=lambda x: x[3], reverse=True)
-    offensive.sort(key=lambda x: x[3], reverse=True)
+    warfare.sort(key=lambda x: x[4], reverse=True)
+    offensive.sort(key=lambda x: x[4], reverse=True)
 
     # Solo entran los que efectivamente tuvieron al menos 1 voto
-    warfare_sel = [m for m in warfare[:WARFARE_SLOTS] if m[3] > 0]
-    offensive_sel = [m for m in offensive[:OFFENSIVE_SLOTS] if m[3] > 0]
+    warfare_sel = [m for m in warfare[:WARFARE_SLOTS] if m[4] > 0]
+    offensive_sel = [m for m in offensive[:OFFENSIVE_SLOTS] if m[4] > 0]
+
+    def variantes(indice: int, id_a: str, id_b: str) -> tuple[str, str]:
+        """Par (id_ronda1, id_ronda2) según si el índice (0-based, por
+        ranking de votos dentro de su categoría) es par o impar."""
+        return (id_a, id_b) if indice % 2 == 0 else (id_b, id_a)
 
     if not offensive_sel:
-        return [m[2] for m in warfare_sel]
+        pares = [variantes(i, m[2], m[3]) for i, m in enumerate(warfare_sel)]
+        ronda1 = [p[0] for p in pares]
+        ronda2 = [p[1] for p in pares]
+        return ronda1 + ronda2
 
     n_off = len(offensive_sel)
     block = len(warfare_sel) // n_off
     extra = len(warfare_sel) % n_off  # si no divide justo, los primeros bloques absorben el resto
 
-    ids: list[str] = []
+    pares: list[tuple[str, str]] = []  # (id_ronda1, id_ronda2), en el orden final
     w_idx = 0
     for i in range(n_off):
         take = block + (1 if i < extra else 0)
-        ids.extend(m[2] for m in warfare_sel[w_idx:w_idx + take])
+        for j in range(w_idx, w_idx + take):
+            m = warfare_sel[j]
+            pares.append(variantes(j, m[2], m[3]))
         w_idx += take
-        ids.append(offensive_sel[i][2])
-    ids.extend(m[2] for m in warfare_sel[w_idx:])  # por si sobrara alguno
-    return ids
+        om = offensive_sel[i]
+        pares.append(variantes(i, om[2], om[3]))
+    for j in range(w_idx, len(warfare_sel)):
+        m = warfare_sel[j]
+        pares.append(variantes(j, m[2], m[3]))
+
+    ronda1 = [p[0] for p in pares]
+    ronda2 = [p[1] for p in pares]
+    return ronda1 + ronda2
 
 
 # =========================================================================
@@ -217,6 +250,13 @@ async def apply_rotation_to_crcon(map_ids: list[str]) -> str:
     Reemplaza la rotación actual del CRCON por map_ids: saca todos los mapas
     que estén puestos ahora y agrega los nuevos. Devuelve un texto corto con
     el resultado, para loguear o mostrar en Discord.
+
+    A diferencia de antes, ahora CONFIRMA que la rotación haya quedado
+    realmente vacía antes de agregar los mapas nuevos -- si algún mapa no se
+    pudo sacar (ej: el que se está jugando en este momento, que el CRCON no
+    deja remover), se avisa en vez de agregar mapas nuevos encima de los que
+    quedaron pegados, que es lo que hacía crecer la rotación semana a semana
+    hasta números como 157.
     """
     if not CRCON_API_TOKEN or "REEMPLAZAR" in CRCON_BASE_URL:
         return "⚠️ CRCON no configurado (falta token o URL) — rotación no aplicada en el servidor."
@@ -230,24 +270,68 @@ async def apply_rotation_to_crcon(map_ids: list[str]) -> str:
         "Content-Type": "application/json",
     }
 
+    async def get_current_ids(session: aiohttp.ClientSession) -> list[str]:
+        async with session.get(f"{CRCON_BASE_URL}/api/get_map_rotation") as resp:
+            data = await resp.json()
+            result = data.get("result") or {}
+            current = result.get("maps", []) if isinstance(result, dict) else (result or [])
+            return [m.get("id") if isinstance(m, dict) else m for m in current]
+
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
             # 1. Traer la rotación actual
-            async with session.get(f"{CRCON_BASE_URL}/api/get_map_rotation") as resp:
-                data = await resp.json()
-                result = data.get("result") or {}
-                current = result.get("maps", []) if isinstance(result, dict) else (result or [])
-                current_ids = [m.get("id") if isinstance(m, dict) else m for m in current]
+            current_ids = await get_current_ids(session)
 
-            # 2. Sacar cada mapa actual de la rotación
+            # 2. Sacar cada mapa actual de la rotación, CONFIRMANDO cada uno
+            fallidos: list[str] = []
             for map_id in current_ids:
                 async with session.post(
                     f"{CRCON_BASE_URL}/api/remove_map_from_rotation",
                     json={"map_name": map_id},
-                ):
-                    pass
+                ) as resp:
+                    ok = resp.status == 200
+                    if ok:
+                        try:
+                            body = await resp.json()
+                            ok = not body.get("failed")
+                        except Exception:
+                            pass
+                    if not ok:
+                        fallidos.append(map_id)
 
-            # 3. Agregar los nuevos mapas de la semana
+            # 2b. Reintento único para los que fallaron la primera vez (a
+            # veces alcanza con reintentar si fue un hiccup pasajero)
+            if fallidos:
+                reintentar = fallidos
+                fallidos = []
+                for map_id in reintentar:
+                    async with session.post(
+                        f"{CRCON_BASE_URL}/api/remove_map_from_rotation",
+                        json={"map_name": map_id},
+                    ) as resp:
+                        ok = resp.status == 200
+                        if ok:
+                            try:
+                                body = await resp.json()
+                                ok = not body.get("failed")
+                            except Exception:
+                                pass
+                        if not ok:
+                            fallidos.append(map_id)
+
+            # 3. Confirmar contra el servidor que realmente quedó vacío antes
+            # de agregar nada nuevo -- no confiamos ciegamente en los pasos de
+            # arriba, volvemos a preguntar.
+            restantes = await get_current_ids(session)
+            if restantes:
+                return (
+                    f"❌ No se pudo vaciar la rotación del todo -- quedaron {len(restantes)} mapa(s) sin "
+                    f"sacar ({', '.join(restantes[:5])}{'...' if len(restantes) > 5 else ''}). "
+                    f"No se agregó nada nuevo para no acumular más. Sacalos a mano desde el panel del "
+                    f"CRCON (Settings → Maps → Rotation) y probá aplicar la rotación de nuevo."
+                )
+
+            # 4. Recién ahora, agregar los mapas nuevos de la semana
             async with session.post(
                 f"{CRCON_BASE_URL}/api/add_maps_to_rotation",
                 json={"map_names": valid_ids},
@@ -257,7 +341,7 @@ async def apply_rotation_to_crcon(map_ids: list[str]) -> str:
                     return f"❌ Error aplicando rotación en CRCON (HTTP {resp.status}): {text[:200]}"
 
         skipped = len(map_ids) - len(valid_ids)
-        msg = f"✅ Rotación aplicada en el servidor ({len(valid_ids)} mapas)."
+        msg = f"✅ Rotación aplicada en el servidor ({len(valid_ids)} mapas, rotación vaciada correctamente antes)."
         if skipped:
             msg += f" {skipped} mapa(s) se salteó por no tener ID configurado."
         return msg
@@ -296,7 +380,7 @@ def build_embed(state: dict) -> discord.Embed:
     )
     embed.add_field(name="🔁 Repite", value=f"Cada {VOTE_CYCLE_DAYS} días", inline=False)
 
-    for name, emoji, _, _ in MAPS:
+    for name, emoji, _, _, _ in MAPS:
         voters = state["votes"].get(emoji, [])
         count = len(voters)
         embed.add_field(name=f"{emoji} {name}", value=f"**{count}** voto{'s' if count != 1 else ''}", inline=True)
@@ -355,7 +439,7 @@ async def post_new_poll(channel: discord.TextChannel):
     state = new_poll_state()
     embed = build_embed(state)
     message = await channel.send(content=f"@everyone 📢 ¡Nueva votación de mapas! (dura {VOTE_CYCLE_DAYS} días)", embed=embed)
-    for _, emoji, _, _ in MAPS:
+    for _, emoji, _, _, _ in MAPS:
         await message.add_reaction(emoji)
     state["message_id"] = message.id
     save_state(state)
@@ -425,7 +509,7 @@ async def rebuild_state_from_channel(channel: discord.TextChannel) -> dict | Non
         except ValueError:
             continue
 
-        votes = {emoji: [] for _, emoji, _, _ in MAPS}
+        votes = {emoji: [] for _, emoji, _, _, _ in MAPS}
         for reaction in message.reactions:
             emoji_key = str(reaction.emoji)
             if emoji_key not in votes:
@@ -658,12 +742,12 @@ async def poll_loop():
     warfare_lines = [
         f"{emoji} {name} — {votes} voto{'s' if votes != 1 else ''}"
         for name, emoji, crcon_id, votes in top_maps
-        if any(m[0] == name and m[3] == "warfare" for m in MAPS)
+        if any(m[0] == name and m[2] == "warfare" for m in MAPS)
     ]
     offensive_lines = [
         f"{emoji} {name} — {votes} voto{'s' if votes != 1 else ''}"
         for name, emoji, crcon_id, votes in top_maps
-        if any(m[0] == name and m[3] == "offensive" for m in MAPS)
+        if any(m[0] == name and m[2] == "offensive" for m in MAPS)
     ]
     announce = discord.Embed(
         title="🗺️ Rotación activa",

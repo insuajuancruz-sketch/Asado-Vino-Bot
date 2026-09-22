@@ -367,6 +367,120 @@ class EditEventModal(discord.ui.Modal):
         await interaction.followup.send("✅ Evento actualizado.", ephemeral=True)
 
 
+class EditDetallesModal(discord.ui.Modal):
+    """Modal separado del de 'Editar evento' -- Discord permite máximo 5
+    campos por modal, y entre nombre/cierra/partido + estos 5 no entraban
+    juntos en uno solo."""
+
+    def __init__(self, message_id: int, event: dict):
+        super().__init__(title="Editar detalles del evento")
+        self.message_id = message_id
+
+        self.bando = discord.ui.TextInput(
+            label="Bando", default=event.get("bando") or "", required=False, max_length=100
+        )
+        self.mapa = discord.ui.TextInput(
+            label="Mapa", default=event.get("mapa") or "", required=False, max_length=100
+        )
+        self.punto_medio = discord.ui.TextInput(
+            label="Punto Medio", default=event.get("punto_medio") or "", required=False, max_length=100
+        )
+        self.fecha = discord.ui.TextInput(
+            label="Fecha (texto libre)", default=event.get("fecha") or "", required=False, max_length=50
+        )
+        self.horario_desplg = discord.ui.TextInput(
+            label="Horario Despliegue", default=event.get("horario_desplg") or "", required=False, max_length=50
+        )
+        self.add_item(self.bando)
+        self.add_item(self.mapa)
+        self.add_item(self.punto_medio)
+        self.add_item(self.fecha)
+        self.add_item(self.horario_desplg)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        events = get_events()
+        event = events.get(str(self.message_id))
+        if not event:
+            await interaction.followup.send("Ese evento ya no existe.", ephemeral=True)
+            return
+
+        event["bando"] = self.bando.value or None
+        event["mapa"] = self.mapa.value or None
+        event["punto_medio"] = self.punto_medio.value or None
+        event["fecha"] = self.fecha.value or None
+        event["horario_desplg"] = self.horario_desplg.value or None
+        persist_events()
+
+        channel = interaction.client.get_channel(event["channel_id"])
+        await _refresh_message(channel, self.message_id, event)
+        await interaction.followup.send("✅ Detalles actualizados.", ephemeral=True)
+
+
+# =========================================================================
+# Anotación manual (admin) -- agregar o quitar miembros de una opción sin
+# que ellos mismos toquen el botón. Selector de estado -> selector nativo de
+# miembros de Discord (nada de escribir nombres a mano).
+# =========================================================================
+
+class _ManualUserSelect(discord.ui.UserSelect):
+    def __init__(self, message_id: int, status: str):
+        super().__init__(placeholder="Elegí uno o más miembros...", min_values=1, max_values=25)
+        self.message_id = message_id
+        self.status = status
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        events = get_events()
+        event = events.get(str(self.message_id))
+        if not event or event.get("closed"):
+            await interaction.followup.send("Esta anotación ya no está disponible.", ephemeral=True)
+            return
+
+        grupo_excluyente = event_all_emojis(event)
+        cambiados = []
+        for member in self.values:
+            entry = f"{member.id}:{member.display_name}"
+            for st in grupo_excluyente:
+                if entry in event["signups"].get(st, []):
+                    event["signups"][st].remove(entry)
+            if self.status != "QUITAR":
+                event["signups"].setdefault(self.status, [])
+                if entry not in event["signups"][self.status]:
+                    event["signups"][self.status].append(entry)
+            cambiados.append(member.display_name)
+
+        persist_events()
+        channel = interaction.client.get_channel(event["channel_id"])
+        await _refresh_message(channel, self.message_id, event)
+
+        accion = "quitados de todas las opciones" if self.status == "QUITAR" else f"agregados a **{_LABELS[self.status]}**"
+        await interaction.followup.send(f"✅ {', '.join(cambiados)} {accion}.", ephemeral=True)
+
+
+class _ManualStatusSelect(discord.ui.Select):
+    def __init__(self, message_id: int, event: dict):
+        options = [discord.SelectOption(label=_LABELS[e], value=e, emoji=e) for e in event_ordered_emojis(event)]
+        options.append(discord.SelectOption(label="Quitar de todas las opciones", value="QUITAR", emoji="🗑️"))
+        super().__init__(placeholder="Elegí a qué opción anotar...", options=options)
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        status = self.values[0]
+        etiqueta = "quitar de todas las opciones" if status == "QUITAR" else f"agregar a {_LABELS[status]}"
+        siguiente = discord.ui.View(timeout=180)
+        siguiente.add_item(_ManualUserSelect(self.message_id, status))
+        await interaction.response.edit_message(content=f"Elegí los miembros para **{etiqueta}**:", view=siguiente)
+
+
+class ManualSignupView(discord.ui.View):
+    def __init__(self, message_id: int, event: dict):
+        super().__init__(timeout=180)
+        self.add_item(_ManualStatusSelect(message_id, event))
+
+
 class SignupView(discord.ui.View):
     """Vista con los botones de anotación en formato 'pill' (con el conteo en
     vivo en la etiqueta, como Apollo) + el botón de editar evento, todos
@@ -394,6 +508,7 @@ class SignupView(discord.ui.View):
                     emoji=emoji,
                     style=self._ESTILOS[emoji],
                     custom_id=f"roster_vote:{message_id}:{emoji}",
+                    row=0,
                 )
                 boton.callback = self._make_vote_callback(emoji)
                 self.add_item(boton)
@@ -403,14 +518,75 @@ class SignupView(discord.ui.View):
                 emoji="✏️",
                 style=discord.ButtonStyle.primary,
                 custom_id=f"roster_edit:{message_id}",
+                row=0,
             )
             editar.callback = self._on_edit_click
             self.add_item(editar)
+
+            detalles = discord.ui.Button(
+                label="Detalles",
+                emoji="📋",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"roster_detalles:{message_id}",
+                row=1,
+            )
+            detalles.callback = self._on_detalles_click
+            self.add_item(detalles)
+
+            manual = discord.ui.Button(
+                label="Anotar manual",
+                emoji="👤",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"roster_manual:{message_id}",
+                row=1,
+            )
+            manual.callback = self._on_manual_click
+            self.add_item(manual)
 
     def _make_vote_callback(self, emoji: str):
         async def callback(interaction: discord.Interaction):
             await _handle_vote_click(interaction, self.message_id, emoji)
         return callback
+
+    async def _on_detalles_click(self, interaction: discord.Interaction):
+        if not _can_edit(interaction):
+            await interaction.response.send_message(
+                "Solo un admin/oficial puede editar este evento.", ephemeral=True
+            )
+            return
+
+        events = get_events()
+        event = events.get(str(self.message_id))
+        if not event:
+            await interaction.response.send_message("No encontré este evento.", ephemeral=True)
+            return
+        if event.get("closed"):
+            await interaction.response.send_message("Esta anotación ya cerró, no se puede editar.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(EditDetallesModal(self.message_id, event))
+
+    async def _on_manual_click(self, interaction: discord.Interaction):
+        if not _can_edit(interaction):
+            await interaction.response.send_message(
+                "Solo un admin/oficial puede anotar manualmente.", ephemeral=True
+            )
+            return
+
+        events = get_events()
+        event = events.get(str(self.message_id))
+        if not event:
+            await interaction.response.send_message("No encontré este evento.", ephemeral=True)
+            return
+        if event.get("closed"):
+            await interaction.response.send_message("Esta anotación ya cerró.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            "¿A qué opción querés anotar (o quitar) a alguien?",
+            view=ManualSignupView(self.message_id, event),
+            ephemeral=True,
+        )
 
     async def _on_edit_click(self, interaction: discord.Interaction):
         if not _can_edit(interaction):

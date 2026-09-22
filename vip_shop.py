@@ -26,10 +26,16 @@ Setup necesario ANTES de que esto funcione de verdad:
     3. En Railway: Settings del servicio -> Networking -> "Generate Domain".
        Esto le da al bot una URL pública (https://tu-app.up.railway.app) -- sin
        esto, ni Mercado Pago ni PayPal pueden avisarle al bot que un pago se aprobó.
-    4. Cargar todas las variables de entorno de la sección CONFIGURACIÓN de abajo
+    4. (Opcional pero recomendado) Respaldo en Google Sheets: reutilizá la
+       misma cuenta de servicio de roster_signup.py. Compartí el Sheet elegido
+       con el "client_email" de esa cuenta (permiso Editor), copiá su ID
+       (la parte de la URL entre "/d/" y "/edit") y cargalo en VIP_SHEET_ID.
+       La pestaña "Compras VIP" se crea sola la primera vez. Si esta variable
+       no se carga, el bot sigue funcionando igual, solo que sin el respaldo.
+    5. Cargar todas las variables de entorno de la sección CONFIGURACIÓN de abajo
        en Railway -> Variables.
 
-Sin estos 4 pasos, el bot sigue funcionando para todo lo demás (votemap), pero
+Sin los pasos 1-3 y 5, el bot sigue funcionando para todo lo demás (votemap), pero
 /comprar_vip va a avisar que la tienda no está configurada todavía, en vez de
 fallar en silencio.
 """
@@ -39,6 +45,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -125,6 +132,58 @@ def create_pending_purchase(discord_user_id: int, player_id: str, player_name: s
 # =========================================================================
 # Integración CRCON — aplicar el VIP de verdad
 # =========================================================================
+
+# El player_id de Hell Let Loose es el Steam64 ID (17 dígitos, siempre
+# empieza con 7656119...) o, para quienes juegan vía Xbox/PlayStation con
+# crossplay, un ID T17 alfanumérico más largo. Esto filtra los errores más
+# comunes (pegar un link entero, un nombre, un ID con espacios/letras raras)
+# antes de mandar a nadie a pagar con un player_id que después no matchea.
+_STEAM64_RE = re.compile(r"^7656119\d{10}$")
+_T17_RE = re.compile(r"^[A-Za-z0-9_-]{20,40}$")
+
+
+def validar_formato_player_id(player_id: str) -> tuple[bool, str]:
+    """Chequeo rápido y sincrónico, sin llamar a nada -- solo valida forma."""
+    pid = player_id.strip()
+    if _STEAM64_RE.match(pid) or _T17_RE.match(pid):
+        return True, pid
+    return False, (
+        "Ese player ID no tiene pinta de Steam ID válido (tienen que ser 17 dígitos, "
+        "empezando con `7656119...`). Buscá el tuyo en https://hllrecords.com/ y "
+        "copialo tal cual aparece ahí, no el link completo del perfil."
+    )
+
+
+async def lookup_player_en_crcon(player_id: str) -> tuple[bool, str | None]:
+    """Busca el player_id en el historial del CRCON para confirmar que existe
+    y, si lo encuentra, devuelve el último nombre con el que jugó -- así el
+    usuario puede confirmar que es el ID correcto antes de pagar. Si el CRCON
+    no está configurado, no responde, o no lo reconoce, devuelve (False, None)
+    sin bloquear la compra -- puede ser alguien que nunca jugó en el server
+    todavía, y no queremos frenar una venta real por eso."""
+    if not CRCON_API_TOKEN:
+        return False, None
+
+    headers = {"Authorization": f"Bearer {CRCON_API_TOKEN}"}
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(
+                f"{CRCON_BASE_URL}/api/get_player_profile",
+                params={"player_id": player_id},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status != 200:
+                    return False, None
+                data = await resp.json()
+                result = data.get("result") if isinstance(data, dict) else None
+                if not result:
+                    return False, None
+                names = result.get("names") or []
+                ultimo_nombre = names[0]["name"] if names else None
+                return True, ultimo_nombre
+    except Exception:
+        return False, None
+
 
 async def grant_vip(player_id: str, days: int, description: str) -> tuple[bool, str]:
     """Llama a POST /api/add_vip. Devuelve (ok, mensaje)."""
@@ -442,6 +501,12 @@ def setup_vip_commands(tree: discord.app_commands.CommandTree, client: discord.C
             )
             return
 
+        formato_ok, resultado = validar_formato_player_id(player_id)
+        if not formato_ok:
+            await interaction.response.send_message(resultado, ephemeral=True)
+            return
+        player_id = resultado  # ya viene "strippeado"
+
         if not PUBLIC_BASE_URL:
             await interaction.response.send_message(
                 "⚠️ La tienda de VIP todavía no está configurada del todo (falta la URL pública "
@@ -451,6 +516,21 @@ def setup_vip_commands(tree: discord.app_commands.CommandTree, client: discord.C
             return
 
         await interaction.response.defer(ephemeral=True)
+
+        # Verificación contra el CRCON (best-effort, no bloquea la compra si
+        # el ID es de alguien que nunca jugó todavía o si el CRCON no
+        # responde) -- si lo encuentra, avisa con qué nombre está registrado
+        # para que el usuario confirme que apuntó al ID correcto.
+        encontrado, nombre_crcon = await lookup_player_en_crcon(player_id)
+        aviso_crcon = ""
+        if encontrado and nombre_crcon:
+            aviso_crcon = f"\n\n🔎 Ese ID está registrado en el server como **{nombre_crcon}**. Si no sos vos, revisá el ID antes de pagar."
+        elif not encontrado:
+            aviso_crcon = (
+                "\n\n⚠️ No encontramos ese ID en el historial del server (puede ser que "
+                "nunca hayas jugado ahí, o que el ID esté mal). Fijate bien en "
+                "https://hllrecords.com/ antes de pagar."
+            )
 
         token = create_pending_purchase(interaction.user.id, player_id, nombre, meses, metodo.value)
 
@@ -477,7 +557,8 @@ def setup_vip_commands(tree: discord.app_commands.CommandTree, client: discord.C
         await interaction.followup.send(
             f"💳 **VIP {meses} mes{'es' if meses != 1 else ''} — {precio_str}**\n"
             f"Pagá acá para activarlo automáticamente:\n{link}\n\n"
-            f"Apenas se confirme el pago te aviso por acá mismo.",
+            f"Apenas se confirme el pago te aviso por acá mismo."
+            f"{aviso_crcon}",
             ephemeral=True,
         )
 

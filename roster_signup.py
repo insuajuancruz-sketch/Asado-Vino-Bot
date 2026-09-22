@@ -918,10 +918,37 @@ async def _refresh_message(channel: discord.TextChannel, message_id: int, event:
 async def register_persistent_views(client: discord.Client):
     """Se llama una vez en on_ready -- vuelve a registrar los botones de las
     anotaciones que sigan abiertas, para que sigan funcionando después de un
-    redeploy del bot."""
-    for message_id, event in get_events().items():
-        if not event.get("closed"):
+    redeploy del bot.
+
+    Antes, si UN SOLO evento fallaba al crear su vista (datos corruptos de un
+    evento viejo, un error puntual de discord.py, etc.), la excepción cortaba
+    el for entero sin loggear nada -- y todos los eventos que venían después
+    en el diccionario quedaban sin re-registrar, sin ningún rastro visible en
+    los logs. Ahora cada evento se procesa aislado (uno roto no tumba a los
+    demás) y se loggea un resumen al final, para poder confirmar en los logs
+    de Railway después de cada redeploy que todo lo que debía re-engancharse
+    se re-enganchó."""
+    eventos = get_events()
+    abiertos = [(mid, ev) for mid, ev in eventos.items() if not ev.get("closed")]
+    ok = 0
+    fallidos = []
+
+    for message_id, event in abiertos:
+        try:
             client.add_view(SignupView(int(message_id), event), message_id=int(message_id))
+            ok += 1
+        except Exception as error:
+            fallidos.append((message_id, event.get("evento", "?"), error))
+
+    print(
+        f"[roster_signup] register_persistent_views: {ok}/{len(abiertos)} "
+        f"anotaciones abiertas re-registradas."
+    )
+    for message_id, nombre, error in fallidos:
+        print(
+            f"[roster_signup]   ⚠️ FALLÓ message_id={message_id} evento='{nombre}': "
+            f"{type(error).__name__}: {error}"
+        )
 
 
 # LEGACY: el bot ya no agrega estas reacciones solo (ver SignupView, que

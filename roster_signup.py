@@ -138,8 +138,19 @@ def load_events() -> dict:
 
 
 def save_events(events: dict):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+    # Escritura atómica: escribe primero a un archivo temporal y recién al
+    # final lo renombra sobre el definitivo. os.replace() es atómico a nivel
+    # de sistema de archivos -- o el archivo queda con el contenido viejo
+    # completo, o con el nuevo completo, nunca a medio escribir. Sin esto,
+    # un reinicio/redeploy que corte el proceso justo en medio de un
+    # json.dump() puede dejar roster_state.json vacío o truncado, perdiendo
+    # TODOS los eventos guardados (esto es lo que probablemente pasó).
+    tmp_path = f"{STATE_FILE}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(events, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, STATE_FILE)
 
 
 # Cache en memoria -- es la fuente de verdad mientras el bot corre. Evita una
@@ -824,8 +835,39 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         await interaction.followup.send("Cerrando la anotación ahora mismo...", ephemeral=True)
 
     @tree.command(
+        name="estado_anotaciones",
+        description="Diagnóstico: lista todo lo que hay guardado en roster_state.json",
+        guild=discord.Object(id=guild_id),
+    )
+    async def estado_anotaciones(interaction: discord.Interaction):
+        if not _can_edit(interaction):
+            await interaction.response.send_message(
+                "Solo un admin/oficial puede usar este comando.", ephemeral=True
+            )
+            return
+
+        events = get_events()
+        if not events:
+            await interaction.response.send_message(
+                f"⚠️ No hay NINGÚN evento guardado (ni abierto ni cerrado) en `{STATE_FILE}`. "
+                f"El archivo está vacío o no existe.",
+                ephemeral=True,
+            )
+            return
+
+        lineas = []
+        for message_id, ev in events.items():
+            estado = "🔴 cerrada" if ev.get("closed") else "🟢 abierta"
+            lineas.append(f"{estado} — `{message_id}` — {ev.get('evento', '?')} (canal <#{ev.get('channel_id')}>)")
+
+        texto = f"**{len(events)} evento(s) guardados en `{STATE_FILE}`:**\n" + "\n".join(lineas[:25])
+        if len(lineas) > 25:
+            texto += f"\n…(+{len(lineas) - 25} más)"
+        await interaction.response.send_message(texto, ephemeral=True)
+
+    @tree.command(
         name="reparar_anotacion",
-        description="Re-engancha los botones de la anotación abierta en este canal (por si quedaron 'muertos' tras un reinicio)",
+        description="Re-engancha los botones de la anotación abierta en este canal",
         guild=discord.Object(id=guild_id),
     )
     async def reparar_anotacion(interaction: discord.Interaction):

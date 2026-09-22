@@ -823,6 +823,64 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         persist_events()
         await interaction.followup.send("Cerrando la anotación ahora mismo...", ephemeral=True)
 
+    @tree.command(
+        name="reparar_anotacion",
+        description="Re-engancha los botones de la anotación abierta en este canal (por si quedaron 'muertos' tras un reinicio)",
+        guild=discord.Object(id=guild_id),
+    )
+    async def reparar_anotacion(interaction: discord.Interaction):
+        if not _can_edit(interaction):
+            await interaction.response.send_message(
+                "Solo un admin/oficial puede usar este comando.", ephemeral=True
+            )
+            return
+        if interaction.response.is_done():
+            return
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.HTTPException:
+            return
+
+        events = get_events()
+        match = next(
+            (mid for mid, ev in events.items() if ev["channel_id"] == interaction.channel_id and not ev.get("closed")),
+            None,
+        )
+        if not match:
+            await interaction.followup.send("No hay ninguna anotación abierta en este canal.", ephemeral=True)
+            return
+
+        event = events[match]
+        message_id = int(match)
+        try:
+            message = await interaction.channel.fetch_message(message_id)
+        except discord.NotFound:
+            await interaction.followup.send(
+                "No encontré el mensaje de esa anotación (¿se borró?). Los votos siguen guardados igual.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as error:
+            await interaction.followup.send(f"No pude acceder al mensaje: {error}", ephemeral=True)
+            return
+
+        # Repara SIN tocar el estado de anotados -- solo re-crea la vista y la
+        # vuelve a enganchar, tanto en el mensaje como en el store de vistas
+        # persistentes del cliente, exactamente como si el bot recién
+        # arrancara para este evento puntual.
+        view = SignupView(message_id, event)
+        try:
+            await message.edit(embed=build_embed(event), view=view)
+        except discord.HTTPException as error:
+            await interaction.followup.send(f"No pude editar el mensaje: {error}", ephemeral=True)
+            return
+        client.add_view(view, message_id=message_id)
+
+        await interaction.followup.send(
+            "✅ Botones re-enganchados. Los votos ya guardados (Confirmar/Tentativo/Cancelado/Tanque) no se tocaron.",
+            ephemeral=True,
+        )
+
     @tree.command(name="organigrama", description="Postea una captura del roster actual (ORGANIGRAMA GENERAL)", guild=discord.Object(id=guild_id))
     async def organigrama(interaction: discord.Interaction):
         if interaction.response.is_done():

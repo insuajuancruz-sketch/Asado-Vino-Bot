@@ -108,8 +108,20 @@ def load_purchases() -> dict:
 
 
 def save_purchases(purchases: dict):
-    with open(PURCHASES_FILE, "w", encoding="utf-8") as f:
+    # Escritura atómica (mismo motivo que en roster_signup.py): escribe a un
+    # archivo temporal y recién al final lo renombra sobre el definitivo con
+    # os.replace(), que es atómico a nivel de sistema de archivos. Antes se
+    # escribía directo sobre vip_purchases.json -- un redeploy/reinicio que
+    # cortara el proceso a mitad del json.dump() podía dejar el archivo
+    # vacío o truncado, perdiendo TODAS las compras ya registradas (esto es
+    # lo que probablemente pasó: la compra de 7DLR Nova se aplicó bien pero
+    # después /historial_compras no encontró nada).
+    tmp_path = f"{PURCHASES_FILE}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(purchases, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, PURCHASES_FILE)
 
 
 def create_pending_purchase(discord_user_id: int, player_id: str, player_name: str, meses: int, metodo: str) -> str:

@@ -657,7 +657,10 @@ async def seed(interaction: discord.Interaction):
         f"🗺️ Recordá que ya podés votar la rotación de mapas de la semana en <#{CHANNEL_ID}>\n"
         f"⭐ Y también podés comprar tu VIP en <#{VIP_CHANNEL_ID}>"
     )
-    await interaction.followup.send(contenido)
+    await interaction.followup.send(
+    contenido,
+    allowed_mentions=discord.AllowedMentions(everyone=True),
+)
 
 
 @seed.error

@@ -385,16 +385,12 @@ class EditDetallesModal(discord.ui.Modal):
         self.punto_medio = discord.ui.TextInput(
             label="Punto Medio", default=event.get("punto_medio") or "", required=False, max_length=100
         )
-        self.fecha = discord.ui.TextInput(
-            label="Fecha (texto libre)", default=event.get("fecha") or "", required=False, max_length=50
-        )
         self.horario_desplg = discord.ui.TextInput(
             label="Horario Despliegue", default=event.get("horario_desplg") or "", required=False, max_length=50
         )
         self.add_item(self.bando)
         self.add_item(self.mapa)
         self.add_item(self.punto_medio)
-        self.add_item(self.fecha)
         self.add_item(self.horario_desplg)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -409,7 +405,6 @@ class EditDetallesModal(discord.ui.Modal):
         event["bando"] = self.bando.value or None
         event["mapa"] = self.mapa.value or None
         event["punto_medio"] = self.punto_medio.value or None
-        event["fecha"] = self.fecha.value or None
         event["horario_desplg"] = self.horario_desplg.value or None
         persist_events()
 
@@ -886,7 +881,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         bando="Bando a jugar (ej: Aliados / Eje)",
         mapa="Mapa de la partida (ej: Carentan)",
         punto_medio="Punto medio / estrongpoint de referencia",
-        fecha="Fecha de la partida (texto libre, ej: 15/09)",
         horario_desplg="Horario de despliegue/asistencia",
         imagen="Imagen/banner opcional para el evento (subila directo acá)",
         mencionar1="Rol opcional a mencionar/taggear al postear el evento (ej: @Jugadores)",
@@ -904,7 +898,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
         bando: str | None = None,
         mapa: str | None = None,
         punto_medio: str | None = None,
-        fecha: str | None = None,
         horario_desplg: str | None = None,
         imagen: discord.Attachment | None = None,
         mencionar1: discord.Role | None = None,
@@ -947,7 +940,6 @@ def setup_roster_commands(tree: discord.app_commands.CommandTree, client: discor
             "bando": bando,
             "mapa": mapa,
             "punto_medio": punto_medio,
-            "fecha": fecha,
             "horario_desplg": horario_desplg,
             "incluir_tanque": incluir_tanque,
             "image_url": imagen.url if imagen else None,
